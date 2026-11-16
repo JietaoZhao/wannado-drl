@@ -1,0 +1,73 @@
+[build-system]
+requires = ["setuptools>=77.0.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "wannado-drl"
+version = "1.0.2"
+description = "AI-focused, CleanRL-style modular deep reinforcement learning platform with Problem-to-MDP co-design, multi-library env adapters, anti-fake-convergence auditing, and verified citations."
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [
+    { name = "JettZ" },
+]
+keywords = [
+    "reinforcement-learning",
+    "deep-reinforcement-learning",
+    "mdp",
+    "cleanrl",
+    "multi-agent-rl",
+    "grpo",
+    "ai-native",
+    "ai-ide",
+]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.0",
+    "gymnasium>=1.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/JietaoZhao/wannado-drl"
+Repository = "https://github.com/JietaoZhao/wannado-drl"
+Issues = "https://github.com/JietaoZhao/wannado-drl/issues"
+
+[project.scripts]
+wannado-drl = "wannado.drl.cli:main"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+]
+release = [
+    "build>=1.2",
+    "twine>=5.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["wannado*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+"wannado.drl.catalog" = ["*.json"]
+"wannado.drl.agent_kit" = ["*.md", "templates/*.md", "templates/*.mdc"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

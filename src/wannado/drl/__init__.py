@@ -1,0 +1,95 @@
+"""wannado.drl — AI-native, CleanRL-style modular Deep Reinforcement Learning library.
+
+Uses PEP 562 lazy loading so importing a single algorithm (e.g. ``from wannado.drl import train_ppo``)
+only loads that standalone CleanRL file without importing the entire catalog.
+"""
+
+from __future__ import annotations
+
+from typing import Any
+
+from wannado.drl.algos import ALGO_EXPORTS, lazy_resolve
+
+__version__ = "1.0.2"
+
+_LAZY_EXPORTS: dict[str, tuple[str, str]] = {
+    **ALGO_EXPORTS,
+    # Stage 0 Problem-to-MDP co-design & baseline evaluators
+    "ActionSpaceSpec": ("wannado.drl.mdp", "ActionSpaceSpec"),
+    "MDPAuditReport": ("wannado.drl.mdp", "MDPAuditReport"),
+    "MDPSpec": ("wannado.drl.mdp", "MDPSpec"),
+    "RewardTermSpec": ("wannado.drl.mdp", "RewardTermSpec"),
+    "StateFeatureSpec": ("wannado.drl.mdp", "StateFeatureSpec"),
+    "SuitabilityDiagnosis": ("wannado.drl.mdp", "SuitabilityDiagnosis"),
+    "TerminationSpec": ("wannado.drl.mdp", "TerminationSpec"),
+    "audit_mdp_spec": ("wannado.drl.mdp", "audit_mdp_spec"),
+    "build_mdp_archetype": ("wannado.drl.mdp", "build_mdp_archetype"),
+    "diagnose_rl_suitability": ("wannado.drl.mdp", "diagnose_rl_suitability"),
+    "evaluate_heuristic_baseline": ("wannado.drl.mdp", "evaluate_heuristic_baseline"),
+    "evaluate_policy_episodes": ("wannado.drl.mdp", "evaluate_policy_episodes"),
+    "evaluate_random_baseline": ("wannado.drl.mdp", "evaluate_random_baseline"),
+    # Stage 1 preflight & Stage 3 Anti-Fake-Convergence Auditor
+    "PreflightReport": ("wannado.drl.audit", "PreflightReport"),
+    "RigorAuditReport": ("wannado.drl.audit", "RigorAuditReport"),
+    "audit_drl_rigor": ("wannado.drl.audit", "audit_drl_rigor"),
+    "preflight_env": ("wannado.drl.audit", "preflight_env"),
+    # Stage 2 AI Co-Pilot inspection, arsenal, dialogs, lineage & ETA
+    "ProjectScan": ("wannado.drl.copilot", "ProjectScan"),
+    "RecommendedAlgoSuite": ("wannado.drl.copilot", "RecommendedAlgoSuite"),
+    "RuntimeEstimate": ("wannado.drl.copilot", "RuntimeEstimate"),
+    "build_arsenal_showcase": ("wannado.drl.copilot", "build_arsenal_showcase"),
+    "build_goal_confirmation_dialog": ("wannado.drl.copilot", "build_goal_confirmation_dialog"),
+    "build_interactive_brief": ("wannado.drl.copilot", "build_interactive_brief"),
+    "build_mdp_intake_brief": ("wannado.drl.copilot", "build_mdp_intake_brief"),
+    "build_post_run_debrief": ("wannado.drl.copilot", "build_post_run_debrief"),
+    "estimate_runtime": ("wannado.drl.copilot", "estimate_runtime"),
+    "explain_parameters": ("wannado.drl.copilot", "explain_parameters"),
+    "format_arsenal_overview": ("wannado.drl.copilot", "format_arsenal_overview"),
+    "get_sota_lineage": ("wannado.drl.copilot", "get_sota_lineage"),
+    "recommend_algo_suite": ("wannado.drl.copilot", "recommend_algo_suite"),
+    "scan_project": ("wannado.drl.copilot", "scan_project"),
+    # Non-intrusive external plug-in workspace & single-file ejection
+    "EnvInterface": ("wannado.drl.workspace", "EnvInterface"),
+    "eject_algo": ("wannado.drl.workspace", "eject_algo"),
+    "scaffold_lab": ("wannado.drl.workspace", "scaffold_lab"),
+    # Stage 4 Paper-Ready DRL Reporter & verified citations
+    "AlgoExperimentSummary": ("wannado.drl.reporter", "AlgoExperimentSummary"),
+    "DRLReport": ("wannado.drl.reporter", "DRLReport"),
+    "build_algo_config": ("wannado.drl.reporter", "build_algo_config"),
+    "evaluate_drl_suite": ("wannado.drl.reporter", "evaluate_drl_suite"),
+    "export_citations": ("wannado.drl.reporter", "export_citations"),
+    # Multi-IDE agent skill & instruction installer
+    "install_agent_kit": ("wannado.drl.agent_kit", "install_agent_kit"),
+    # Catalog knowledge graph helpers
+    "build_registry_json": ("wannado.drl.catalog", "build_registry_json"),
+    "get_taxonomy_tree": ("wannado.drl.catalog", "get_taxonomy_tree"),
+    "load_catalog": ("wannado.drl.catalog", "load_catalog"),
+    "query_catalog": ("wannado.drl.catalog", "query_catalog"),
+    # Universal env adapters & core types
+    "ALGO_DEFAULT_OPTIMIZATIONS": ("wannado.drl.core", "ALGO_DEFAULT_OPTIMIZATIONS"),
+    "AlgoCitation": ("wannado.drl.core", "AlgoCitation"),
+    "AlgoMeta": ("wannado.drl.core", "AlgoMeta"),
+    "EpisodeEvalStats": ("wannado.drl.core", "EpisodeEvalStats"),
+    "MultiAgentEnvAdapter": ("wannado.drl.core", "MultiAgentEnvAdapter"),
+    "OPTIMIZATION_PROVENANCE": ("wannado.drl.core", "OPTIMIZATION_PROVENANCE"),
+    "OfflineTransitionDataset": ("wannado.drl.core", "OfflineTransitionDataset"),
+    "OptimizationProvenance": ("wannado.drl.core", "OptimizationProvenance"),
+    "RunningMeanStd": ("wannado.drl.core", "RunningMeanStd"),
+    "SequenceTaskEnv": ("wannado.drl.core", "SequenceTaskEnv"),
+    "TrainResult": ("wannado.drl.core", "TrainResult"),
+    "UniversalGymAdapter": ("wannado.drl.core", "UniversalGymAdapter"),
+    "aggregate_seed_stats": ("wannado.drl.core", "aggregate_seed_stats"),
+    "compute_iqm": ("wannado.drl.core", "compute_iqm"),
+    "ensure_gym_env": ("wannado.drl.core", "ensure_gym_env"),
+    "resolve_run_optimizations": ("wannado.drl.core", "resolve_run_optimizations"),
+}
+
+__all__ = ["__version__", *_LAZY_EXPORTS.keys()]
+
+
+def __getattr__(name: str) -> Any:
+    return lazy_resolve(name, _LAZY_EXPORTS, globals(), __name__)
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

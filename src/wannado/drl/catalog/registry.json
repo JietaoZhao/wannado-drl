@@ -1,0 +1,1675 @@
+{
+  "schema_version": "1.0",
+  "count": 27,
+  "algorithms": [
+    {
+      "id": "ddpg",
+      "name": "Deep Deterministic Policy Gradient (DDPG)",
+      "family": "actor_critic_off",
+      "paradigm": "off_policy",
+      "tier": "B",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "continuous"
+      ],
+      "env_modalities": [
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "dqn",
+      "diff_from_parent": "Replaces discrete argmax Q(s, a) with a continuous deterministic actor mu(s) trained via dQ/da.",
+      "summary_plain": "First deep off-policy actor-critic for continuous control; direct ancestor of TD3 and SAC.",
+      "when_to_use": "Continuous control baselines and comparing improvements brought by TD3/SAC.",
+      "when_not_to_use": "Sensitive continuous tasks prone to Q-overestimation (prefer `td3` or `sac`) or discrete actions (`dqn`/`ppo`).",
+      "hyperparam_intuition": {
+        "tau": "Polyak soft target blending speed (0.005 keeps target critics smooth).",
+        "exploration_noise": "Gaussian action noise scale added during exploration.",
+        "learning_starts": "Random warmup transitions collected before gradient updates begin."
+      },
+      "extension_hooks": [
+        "Add twin critics + target noise + policy delay -> `td3`",
+        "Replace deterministic policy with entropy-regularized Gaussian -> `sac`"
+      ],
+      "module_path": "wannado.drl.algos.actor_critic_off.ddpg_lillicrap2016",
+      "default_optimizations": [],
+      "citation": {
+        "key": "lillicrap2016continuous",
+        "title": "Continuous control with deep reinforcement learning",
+        "authors": "Timothy P. Lillicrap, Jonathan J. Hunt, Alexander Pritzel, Nicolas Heess, Tom Erez, Yuval Tassa, David Silver, and Daan Wierstra",
+        "venue": "International Conference on Learning Representations (ICLR)",
+        "year": 2016,
+        "url": "https://arxiv.org/abs/1509.02971",
+        "bibtex": "@inproceedings{lillicrap2016continuous,\n  title={Continuous control with deep reinforcement learning},\n  author={Lillicrap, Timothy P. and Hunt, Jonathan J. and Pritzel, Alexander and Heess, Nicolas and Erez, Tom and Tassa, Yuval and Silver, David and Wierstra, Daan},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1509.02971}\n}",
+        "ieee": "T. P. Lillicrap et al., \"Continuous control with deep reinforcement learning,\" in Proc. Int. Conf. Learn. Represent. (ICLR), 2016.",
+        "apa": "Lillicrap, T. P., Hunt, J. J., Pritzel, A., Heess, N., Erez, T., Tassa, Y., Silver, D., & Wierstra, D. (2016). Continuous control with deep reinforcement learning. ICLR."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "sac",
+      "name": "Soft Actor-Critic (SAC)",
+      "family": "actor_critic_off",
+      "paradigm": "off_policy",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "continuous"
+      ],
+      "env_modalities": [
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "td3",
+      "diff_from_parent": "Replaces deterministic actor + fixed exploration noise with maximum-entropy squashed Gaussian policy and auto-tuned alpha.",
+      "summary_plain": "Go-to sample-efficient algorithm for continuous control; balances reward and automatic exploration curiosity.",
+      "when_to_use": "Continuous Box actions when simulator steps are costly and you want strong sample efficiency + smooth exploration.",
+      "when_not_to_use": "Discrete actions (use `ppo` or `dqn`) or zero-interaction static logs (use `cql` / `iql_offline`).",
+      "hyperparam_intuition": {
+        "init_alpha": "Starting entropy temperature; automatically tuned when autotune_alpha=True.",
+        "tau": "Target Q-critic Polyak smoothing factor.",
+        "learning_starts": "Initial random steps seeding replay buffer."
+      },
+      "extension_hooks": [
+        "Add LayerNorm in critics + 50/50 demo/intervention replay -> `hil_serl`",
+        "Add conservative log-sum-exp Q penalty on static data -> `cql`"
+      ],
+      "module_path": "wannado.drl.algos.actor_critic_off.sac_haarnoja2018",
+      "default_optimizations": [
+        "clipped_double_q"
+      ],
+      "citation": {
+        "key": "haarnoja2018soft",
+        "title": "Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor",
+        "authors": "Tuomas Haarnoja, Aurick Zhou, Pieter Abbeel, and Sergey Levine",
+        "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+        "year": 2018,
+        "url": "https://proceedings.mlr.press/v80/haarnoja18a.html",
+        "bibtex": "@inproceedings{haarnoja2018soft,\n  title={Soft Actor-Critic: Off-Policy Maximum Entropy Deep Reinforcement Learning with a Stochastic Actor},\n  author={Haarnoja, Tuomas and Zhou, Aurick and Abbeel, Pieter and Levine, Sergey},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/haarnoja18a.html}\n}",
+        "ieee": "T. Haarnoja, A. Zhou, P. Abbeel, and S. Levine, \"Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 80, 2018.",
+        "apa": "Haarnoja, T., Zhou, A., Abbeel, P., & Levine, S. (2018). Soft actor-critic: Off-policy maximum entropy deep reinforcement learning with a stochastic actor. ICML (PMLR 80)."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        }
+      ]
+    },
+    {
+      "id": "td3",
+      "name": "Twin Delayed DDPG (TD3)",
+      "family": "actor_critic_off",
+      "paradigm": "off_policy",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "continuous"
+      ],
+      "env_modalities": [
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "ddpg",
+      "diff_from_parent": "Adds Twin Clipped Double-Q critics, delayed actor/target updates, and target action smoothing.",
+      "summary_plain": "Gold-standard deterministic continuous control algorithm; far more stable than DDPG.",
+      "when_to_use": "Sample-efficient continuous control benchmarks where deterministic smooth control is preferred.",
+      "when_not_to_use": "Discrete actions (`dqn`/`ppo`) or multimodal exploration tasks needing entropy maximization (`sac`).",
+      "hyperparam_intuition": {
+        "policy_delay": "Number of critic updates per actor update (default 2 lets Q-values settle first).",
+        "policy_noise": "Smoothing jitter added to target actions to prevent narrow Q-function spikes.",
+        "tau": "Polyak soft update rate for target networks."
+      },
+      "extension_hooks": [
+        "Swap deterministic actor for entropy-tuned squashed Gaussian -> `sac`",
+        "Add TD3+BC behavior cloning regularizer for offline continuous control"
+      ],
+      "module_path": "wannado.drl.algos.actor_critic_off.td3_fujimoto2018",
+      "default_optimizations": [
+        "clipped_double_q"
+      ],
+      "citation": {
+        "key": "fujimoto2018addressing",
+        "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+        "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+        "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+        "year": 2018,
+        "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+        "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+        "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 80, 2018.",
+        "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        }
+      ]
+    },
+    {
+      "id": "hil_serl",
+      "name": "Human-in-the-Loop SERL (HIL-SERL / RLPD)",
+      "family": "actor_critic_off",
+      "paradigm": "off_policy",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "continuous"
+      ],
+      "env_modalities": [
+        "continuous_control",
+        "robotics",
+        "custom_sim"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "sac",
+      "diff_from_parent": "Adds LayerNorm Q-critics, 50/50 symmetric offline-demo/online sampling (RLPD), high UTD updates, and live human intervention replay.",
+      "summary_plain": "Ultra-sample-efficient SAC upgraded with prior demonstrations and live human corrective interventions.",
+      "when_to_use": "Complex continuous/manipulation tasks where pure online exploration fails or you have human demos/takeovers.",
+      "when_not_to_use": "Zero online interaction allowed (`cql`/`iql_offline`) or simple fast sims where standard `sac`/`ppo` solves easily.",
+      "hyperparam_intuition": {
+        "demo_fraction": "Fraction of each gradient batch drawn from expert demos / human interventions (0.5 canonical RLPD).",
+        "utd_ratio": "Gradient steps taken per environment step (higher = faster bootstrapping, stabilized by LayerNorm).",
+        "init_alpha": "Initial entropy temperature."
+      },
+      "extension_hooks": [
+        "Supply `intervention_fn(obs, agent_action, info) -> (taken_over, human_action)` for real-time corrections",
+        "Attach a learned binary success reward classifier in env_wrapper"
+      ],
+      "module_path": "wannado.drl.algos.actor_critic_off.hil_serl_luo2025",
+      "default_optimizations": [
+        "clipped_double_q",
+        "rlpd_symmetric_replay",
+        "layer_norm_critic"
+      ],
+      "citation": {
+        "key": "luo2025hilserl",
+        "title": "Precise and Dexterous Robotic Manipulation via Human-in-the-Loop Reinforcement Learning",
+        "authors": "Jianlan Luo, Charles Xu, Jeffrey Wu, and Sergey Levine",
+        "venue": "Science Robotics, vol. 10, no. 105, eads5033",
+        "year": 2025,
+        "url": "https://arxiv.org/abs/2410.21845",
+        "bibtex": "@article{luo2025hilserl,\n  title={Precise and Dexterous Robotic Manipulation via Human-in-the-Loop Reinforcement Learning},\n  author={Luo, Jianlan and Xu, Charles and Wu, Jeffrey and Levine, Sergey},\n  journal={Science Robotics},\n  volume={10},\n  number={105},\n  pages={eads5033},\n  year={2025},\n  url={https://arxiv.org/abs/2410.21845}\n}",
+        "ieee": "J. Luo, C. Xu, J. Wu, and S. Levine, \"Precise and dexterous robotic manipulation via human-in-the-loop reinforcement learning,\" Science Robotics, vol. 10, no. 105, eads5033, 2025.",
+        "apa": "Luo, J., Xu, C., Wu, J., & Levine, S. (2025). Precise and dexterous robotic manipulation via human-in-the-loop reinforcement learning. Science Robotics, 10(105), eads5033."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        },
+        {
+          "id": "rlpd_symmetric_replay",
+          "name": "RLPD 50/50 Symmetric Offline-Online Replay & High-UTD",
+          "role_plain": "Mixes batches 50/50 between offline demos/human interventions and online rollouts under high update-to-data ratios.",
+          "citation": {
+            "key": "ball2023efficient",
+            "title": "Efficient Online Reinforcement Learning with Offline Data",
+            "authors": "Philip J. Ball, Laura Smith, Ilya Kostrikov, and Sergey Levine",
+            "venue": "Proceedings of the 40th International Conference on Machine Learning (ICML), PMLR 202",
+            "year": 2023,
+            "url": "https://arxiv.org/abs/2302.02948",
+            "bibtex": "@inproceedings{ball2023efficient,\n  title={Efficient Online Reinforcement Learning with Offline Data},\n  author={Ball, Philip J. and Smith, Laura and Kostrikov, Ilya and Levine, Sergey},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  year={2023},\n  url={https://arxiv.org/abs/2302.02948}\n}",
+            "ieee": "P. J. Ball, L. Smith, I. Kostrikov, and S. Levine, \"Efficient online reinforcement learning with offline data,\" in Proc. ICML, 2023.",
+            "apa": "Ball, P. J., Smith, L., Kostrikov, I., & Levine, S. (2023). Efficient online reinforcement learning with offline data. ICML."
+          }
+        },
+        {
+          "id": "layer_norm_critic",
+          "name": "Layer Normalization in Critic Networks",
+          "role_plain": "Stabilizes Q-network activations and prevents catastrophic Q-divergence under high UTD and OOD data.",
+          "citation": {
+            "key": "ba2016layer",
+            "title": "Layer Normalization",
+            "authors": "Jimmy Lei Ba, Jamie Ryan Kiros, and Geoffrey E. Hinton",
+            "venue": "arXiv preprint arXiv:1607.06450",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1607.06450",
+            "bibtex": "@article{ba2016layer,\n  title={Layer Normalization},\n  author={Ba, Jimmy Lei and Kiros, Jamie Ryan and Hinton, Geoffrey E.},\n  journal={arXiv preprint arXiv:1607.06450},\n  year={2016},\n  url={https://arxiv.org/abs/1607.06450}\n}",
+            "ieee": "J. L. Ba, J. R. Kiros, and G. E. Hinton, \"Layer normalization,\" arXiv:1607.06450, 2016.",
+            "apa": "Ba, J. L., Kiros, J. R., & Hinton, G. E. (2016). Layer normalization. arXiv:1607.06450."
+          }
+        }
+      ]
+    },
+    {
+      "id": "grpo",
+      "name": "Group Relative Policy Optimization (GRPO)",
+      "family": "llm_and_discovered",
+      "paradigm": "group_relative",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "autoregressive_sequence"
+      ],
+      "env_modalities": [
+        "reasoning_sequence",
+        "llm_rl"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": true,
+      "parent_id": "ppo",
+      "diff_from_parent": "Removes the Critic value model; estimates baseline advantages across G sampled rollouts per prompt + k3 KL regularization.",
+      "summary_plain": "Critic-free sequence RL comparing G parallel attempts per prompt against each other; foundation of DeepSeek-R1 style RL.",
+      "when_to_use": "Sequence/reasoning/code/symbolic generation tasks with verifiable final outcome scores.",
+      "when_not_to_use": "Dense step-by-step continuous control (`sac`/`ppo`) or when you need DAPO's anti-entropy-collapse fixes (`dapo`).",
+      "hyperparam_intuition": {
+        "group_size": "Number of candidate responses sampled per prompt (G) to compute group baseline.",
+        "kl_coef": "Weight of k3 KL divergence keeping policy close to frozen reference model.",
+        "clip_coef": "PPO-style probability ratio clipping threshold."
+      },
+      "extension_hooks": [
+        "Add Clip-Higher + Dynamic Sampling + Token-level loss -> `dapo`",
+        "Switch to sequence-level geometric mean ratio -> `gspo`",
+        "Add post-tool entropy branching rollouts -> `arpo`"
+      ],
+      "module_path": "wannado.drl.algos.llm_and_discovered.grpo_shao2024",
+      "default_optimizations": [],
+      "citation": {
+        "key": "shao2024deepseekmath",
+        "title": "DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models",
+        "authors": "Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Xiao Bi, Haowei Zhang, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo",
+        "venue": "arXiv preprint arXiv:2402.03300",
+        "year": 2024,
+        "url": "https://arxiv.org/abs/2402.03300",
+        "bibtex": "@article{shao2024deepseekmath,\n  title={DeepSeekMath: Pushing the Limits of Mathematical Reasoning in Open Language Models},\n  author={Shao, Zhihong and Wang, Peiyi and Zhu, Qihao and Xu, Runxin and Song, Junxiao and Bi, Xiao and Zhang, Haowei and Zhang, Mingchuan and Li, Y. K. and Wu, Y. and Guo, Daya},\n  journal={arXiv preprint arXiv:2402.03300},\n  year={2024},\n  url={https://arxiv.org/abs/2402.03300}\n}",
+        "ieee": "Z. Shao et al., \"DeepSeekMath: Pushing the limits of mathematical reasoning in open language models,\" arXiv:2402.03300, 2024.",
+        "apa": "Shao, Z., Wang, P., Zhu, Q., Xu, R., Song, J., Bi, X., Zhang, H., Zhang, M., Li, Y. K., Wu, Y., & Guo, D. (2024). DeepSeekMath: Pushing the limits of mathematical reasoning in open language models. arXiv:2402.03300."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "arpo",
+      "name": "Agentic Reinforced Policy Optimization (ARPO)",
+      "family": "llm_and_discovered",
+      "paradigm": "group_relative",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "autoregressive_sequence"
+      ],
+      "env_modalities": [
+        "agentic_tool_use",
+        "reasoning_sequence",
+        "llm_rl"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": true,
+      "parent_id": "grpo",
+      "diff_from_parent": "Adds entropy-triggered local branching after tool observations and stepwise advantage attribution.",
+      "summary_plain": "Focuses rollout branching on uncertain post-tool steps, halving tool budget relative to naive full-trajectory sampling.",
+      "when_to_use": "Multi-turn agentic / tool-calling sequence policies where external tool feedback spikes policy uncertainty.",
+      "when_not_to_use": "Single-turn non-tool tasks (`dapo` / `gspo`), GUI experience replay (Lu et al. 2025), or continuous control (`sac`).",
+      "hyperparam_intuition": {
+        "entropy_branch_ratio": "Multiplier over initial entropy triggering partial local rollouts after tool calls.",
+        "branch_width": "Number of local continuations spawned at high-entropy tool steps.",
+        "group_size": "Global trajectory rollouts per prompt."
+      },
+      "extension_hooks": [
+        "Plug in external simulator/API callback via `SequenceTaskEnv.tool_step_fn`",
+        "Combine ARPO's adaptive branching with GSPO sequence-level ratios"
+      ],
+      "module_path": "wannado.drl.algos.llm_and_discovered.arpo_dong2025",
+      "default_optimizations": [],
+      "citation": {
+        "key": "dong2025arpo",
+        "title": "Agentic Reinforced Policy Optimization",
+        "authors": "Guanting Dong, Hangyu Mao, Kai Ma, Licheng Bao, Yifei Chen, Zhongyuan Wang, et al.",
+        "venue": "arXiv preprint arXiv:2507.19849",
+        "year": 2025,
+        "url": "https://arxiv.org/abs/2507.19849",
+        "bibtex": "@article{dong2025arpo,\n  title={Agentic Reinforced Policy Optimization},\n  author={Dong, Guanting and Mao, Hangyu and Ma, Kai and Bao, Licheng and Chen, Yifei and Wang, Zhongyuan and others},\n  journal={arXiv preprint arXiv:2507.19849},\n  year={2025},\n  url={https://arxiv.org/abs/2507.19849}\n}",
+        "ieee": "G. Dong et al., \"Agentic reinforced policy optimization,\" arXiv:2507.19849, 2025.",
+        "apa": "Dong, G., Mao, H., Ma, K., Bao, L., Chen, Y., Wang, Z., et al. (2025). Agentic reinforced policy optimization. arXiv:2507.19849."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "dapo",
+      "name": "Decoupled Clip & Dynamic Sampling PO (DAPO)",
+      "family": "llm_and_discovered",
+      "paradigm": "group_relative",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "autoregressive_sequence"
+      ],
+      "env_modalities": [
+        "reasoning_sequence",
+        "llm_rl"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": true,
+      "parent_id": "grpo",
+      "diff_from_parent": "Adds asymmetric Clip-Higher, Dynamic Sampling filtering, token-level loss normalization, and overlong reward shaping.",
+      "summary_plain": "Upgrades GRPO to stop entropy collapse and gradient starvation on reasoning sequence tasks.",
+      "when_to_use": "Reasoning sequence RL where GRPO suffers premature entropy collapse or sparse/unbalanced prompt difficulties.",
+      "when_not_to_use": "MoE or ultra-long sequence tasks where token-level ratios destabilize (`gspo`), or dense control (`ppo`).",
+      "hyperparam_intuition": {
+        "clip_low": "Lower clip bound preventing excessive probability suppression.",
+        "clip_high": "Higher upper clip bound (0.28 > 0.2) letting low-probability creative tokens rise.",
+        "dynamic_sampling": "Filters out prompt groups with std(reward)==0 so every update carries learning signal."
+      },
+      "extension_hooks": [
+        "Adjust asymmetric `clip_high` vs `clip_low` ratio to tune exploration vs convergence speed",
+        "Switch token ratio to geometric sequence ratio -> `gspo`"
+      ],
+      "module_path": "wannado.drl.algos.llm_and_discovered.dapo_yu2025",
+      "default_optimizations": [],
+      "citation": {
+        "key": "yu2025dapo",
+        "title": "DAPO: An Open-Source LLM Reinforcement Learning System at Scale",
+        "authors": "Qiying Yu, Zheng Zhang, Ruofei Zhu, Yufeng Yuan, Xiaochen Zuo, Yu Yue, et al.",
+        "venue": "Advances in Neural Information Processing Systems (NeurIPS) / arXiv:2503.14476",
+        "year": 2025,
+        "url": "https://arxiv.org/abs/2503.14476",
+        "bibtex": "@article{yu2025dapo,\n  title={DAPO: An Open-Source LLM Reinforcement Learning System at Scale},\n  author={Yu, Qiying and Zhang, Zheng and Zhu, Ruofei and Yuan, Yufeng and Zuo, Xiaochen and Yue, Yu and others},\n  journal={arXiv preprint arXiv:2503.14476},\n  year={2025},\n  url={https://arxiv.org/abs/2503.14476}\n}",
+        "ieee": "Q. Yu et al., \"DAPO: An open-source LLM reinforcement learning system at scale,\" arXiv:2503.14476, 2025.",
+        "apa": "Yu, Q., Zhang, Z., Zhu, R., Yuan, Y., Zuo, X., Yue, Y., et al. (2025). DAPO: An open-source LLM reinforcement learning system at scale. arXiv:2503.14476."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "discorl",
+      "name": "Discovered RL Update Rule (DiscoRL)",
+      "family": "llm_and_discovered",
+      "paradigm": "meta_discovered",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "meta_rl",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": true,
+      "parent_id": "a2c",
+      "diff_from_parent": "Replaces hand-crafted TD/GAE target equations with a meta-learned GRU update rule and unconstrained latent predictions y(s).",
+      "summary_plain": "Meta-learned RL algorithm (Nature 2025) where a neural update rule invents its own latent targets instead of rigid TD math.",
+      "when_to_use": "Exploring meta-learned RL rules, latent auxiliary predictions, or research on automated RL algorithm discovery.",
+      "when_not_to_use": "Production baselines needing zero meta-overhead or predictable classical tuning (`ppo`/`sac`).",
+      "hyperparam_intuition": {
+        "latent_dim": "Size of unconstrained latent vector y(s) replacing fixed scalar V(s).",
+        "meta_train": "If True, jointly meta-optimizes the update rule itself via differentiable inner updates.",
+        "inner_lr": "Step size used by the inner agent following the meta-discovered update rule."
+      },
+      "extension_hooks": [
+        "Meta-train across a distribution of diverse tasks/environments",
+        "Inspect discovered latent prediction channels y(s) for emergent value/entropy semantics"
+      ],
+      "module_path": "wannado.drl.algos.llm_and_discovered.discorl_oh2025",
+      "default_optimizations": [
+        "gru_memory"
+      ],
+      "citation": {
+        "key": "oh2025discovering",
+        "title": "Discovering state-of-the-art reinforcement learning algorithms",
+        "authors": "Junhyuk Oh, Gregory Farquhar, Iurii Kemaev, Dan A. Calian, Matteo Hessel, Luisa Zintgraf, Satinder Singh, Hado van Hasselt, and David Silver",
+        "venue": "Nature, vol. 648, pp. 312-319",
+        "year": 2025,
+        "url": "https://doi.org/10.1038/s41586-025-09761-x",
+        "bibtex": "@article{oh2025discovering,\n  title={Discovering state-of-the-art reinforcement learning algorithms},\n  author={Oh, Junhyuk and Farquhar, Gregory and Kemaev, Iurii and Calian, Dan A. and Hessel, Matteo and Zintgraf, Luisa and Singh, Satinder and van Hasselt, Hado and Silver, David},\n  journal={Nature},\n  volume={648},\n  pages={312--319},\n  year={2025},\n  doi={10.1038/s41586-025-09761-x}\n}",
+        "ieee": "J. Oh et al., \"Discovering state-of-the-art reinforcement learning algorithms,\" Nature, vol. 648, pp. 312-319, 2025.",
+        "apa": "Oh, J., Farquhar, G., Kemaev, I., Calian, D. A., Hessel, M., Zintgraf, L., Singh, S., van Hasselt, H., & Silver, D. (2025). Discovering state-of-the-art reinforcement learning algorithms. Nature, 648, 312-319."
+      },
+      "optimization_citations": [
+        {
+          "id": "gru_memory",
+          "name": "Gated Recurrent Unit (GRU) Temporal Memory",
+          "role_plain": "Recurrent gated state encoder tracking partial observability and backward meta-update rollouts.",
+          "citation": {
+            "key": "cho2014learning",
+            "title": "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation",
+            "authors": "Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio",
+            "venue": "Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
+            "year": 2014,
+            "url": "https://arxiv.org/abs/1406.1078",
+            "bibtex": "@inproceedings{cho2014learning,\n  title={Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation},\n  author={Cho, Kyunghyun and van Merri{\\\"e}nboer, Bart and Gulcehre, Caglar and Bahdanau, Dzmitry and Bougares, Fethi and Schwenk, Holger and Bengio, Yoshua},\n  booktitle={Proceedings of EMNLP},\n  year={2014},\n  url={https://arxiv.org/abs/1406.1078}\n}",
+            "ieee": "K. Cho et al., \"Learning phrase representations using RNN encoder-decoder for statistical machine translation,\" in Proc. EMNLP, 2014.",
+            "apa": "Cho, K., van Merrienboer, B., Gulcehre, C., Bahdanau, D., Bougares, F., Schwenk, H., & Bengio, Y. (2014). Learning phrase representations using RNN encoder-decoder for statistical machine translation. EMNLP."
+          }
+        }
+      ]
+    },
+    {
+      "id": "gspo",
+      "name": "Group Sequence Policy Optimization (GSPO)",
+      "family": "llm_and_discovered",
+      "paradigm": "group_relative",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "autoregressive_sequence"
+      ],
+      "env_modalities": [
+        "reasoning_sequence",
+        "llm_rl"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": true,
+      "parent_id": "grpo",
+      "diff_from_parent": "Replaces token-level importance ratios with length-normalized sequence-level likelihood ratios and sequence-level clipping.",
+      "summary_plain": "Aligns RL clipping granularity with sequence-level rewards via geometric-mean sequence probability ratios.",
+      "when_to_use": "Long-sequence or MoE reasoning RL where per-token off-policy ratios cause high-variance instability.",
+      "when_not_to_use": "Step-level dense reward control (`ppo`) or token-step branching tool agents (`arpo`).",
+      "hyperparam_intuition": {
+        "clip_coef": "Sequence-level geometric ratio clip width (often tighter than token-level PPO).",
+        "group_size": "Rollouts sampled per prompt for relative sequence normalization.",
+        "kl_coef": "Optional KL anchor toward reference policy."
+      },
+      "extension_hooks": [
+        "Swap sequence-level clipping to asymmetric bounds [1-eps_low, 1+eps_high]",
+        "Add length-weighted sequence advantage calibration"
+      ],
+      "module_path": "wannado.drl.algos.llm_and_discovered.gspo_zheng2025",
+      "default_optimizations": [],
+      "citation": {
+        "key": "zheng2025group",
+        "title": "Group Sequence Policy Optimization",
+        "authors": "Chujie Zheng, Shixuan Liu, Mingze Li, Xiong-Hui Chen, Bowen Yu, Chang Gao, Kai Dang, Yuqiong Liu, Rui Men, An Yang, Jingren Zhou, and Junyang Lin",
+        "venue": "arXiv preprint arXiv:2507.18071",
+        "year": 2025,
+        "url": "https://arxiv.org/abs/2507.18071",
+        "bibtex": "@article{zheng2025group,\n  title={Group Sequence Policy Optimization},\n  author={Zheng, Chujie and Liu, Shixuan and Li, Mingze and Chen, Xiong-Hui and Yu, Bowen and Gao, Chang and Dang, Kai and Liu, Yuqiong and Men, Rui and Yang, An and Zhou, Jingren and Lin, Junyang},\n  journal={arXiv preprint arXiv:2507.18071},\n  year={2025},\n  url={https://arxiv.org/abs/2507.18071}\n}",
+        "ieee": "C. Zheng et al., \"Group sequence policy optimization,\" arXiv:2507.18071, 2025.",
+        "apa": "Zheng, C., Liu, S., Li, M., Chen, X.-H., Yu, B., Gao, C., Dang, K., Liu, Y., Men, R., Yang, A., Zhou, J., & Lin, J. (2025). Group sequence policy optimization. arXiv:2507.18071."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "maddpg",
+      "name": "Multi-Agent DDPG (MADDPG)",
+      "family": "multi_agent",
+      "paradigm": "multi_agent_ctde",
+      "tier": "A",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "multi_agent_continuous"
+      ],
+      "env_modalities": [
+        "multi_agent"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "ddpg",
+      "diff_from_parent": "Trains per-agent decentralized continuous actors against centralized critics conditioned on joint actions.",
+      "summary_plain": "Off-policy multi-agent actor-critic for continuous cooperative or competitive games.",
+      "when_to_use": "Continuous multi-agent control/games where agents may have individual rewards or mixed motives.",
+      "when_not_to_use": "Discrete cooperative MARL (`qmix` / `mappo`) or single-agent tasks (`td3` / `sac`).",
+      "hyperparam_intuition": {
+        "tau": "Polyak soft target update speed for actors and critics.",
+        "exploration_noise": "Continuous Gaussian noise added to each agent's action during training.",
+        "lr": "Adam step size."
+      },
+      "extension_hooks": [
+        "Add twin critics + delayed policy update per agent -> MATD3"
+      ],
+      "module_path": "wannado.drl.algos.multi_agent.maddpg_lowe2017",
+      "default_optimizations": [],
+      "citation": {
+        "key": "lowe2017multi",
+        "title": "Multi-Agent Actor-Critic for Mixed Cooperative-Competitive Environments",
+        "authors": "Ryan Lowe, Yi Wu, Aviv Tamar, Jean Harb, Pieter Abbeel, and Igor Mordatch",
+        "venue": "Advances in Neural Information Processing Systems (NeurIPS)",
+        "year": 2017,
+        "url": "https://arxiv.org/abs/1706.02275",
+        "bibtex": "@inproceedings{lowe2017multi,\n  title={Multi-Agent Actor-Critic for Mixed Cooperative-Competitive Environments},\n  author={Lowe, Ryan and Wu, Yi and Tamar, Aviv and Harb, Jean and Abbeel, Pieter and Mordatch, Igor},\n  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},\n  year={2017},\n  url={https://arxiv.org/abs/1706.02275}\n}",
+        "ieee": "R. Lowe et al., \"Multi-agent actor-critic for mixed cooperative-competitive environments,\" in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2017.",
+        "apa": "Lowe, R., Wu, Y., Tamar, A., Harb, J., Abbeel, P., & Mordatch, I. (2017). Multi-agent actor-critic for mixed cooperative-competitive environments. NeurIPS."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "qmix",
+      "name": "QMIX Monotonic Value Factorisation",
+      "family": "multi_agent",
+      "paradigm": "multi_agent_ctde",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "multi_agent_discrete"
+      ],
+      "env_modalities": [
+        "multi_agent"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "vdn",
+      "diff_from_parent": "Replaces additive Q_tot sum with state-conditioned non-negative hypernetwork mixing.",
+      "summary_plain": "Gold-standard off-policy cooperative MARL using a monotonic mixing hypernetwork driven by global state.",
+      "when_to_use": "Cooperative discrete multi-agent tasks with global state available during training.",
+      "when_not_to_use": "Continuous multi-agent actions (`maddpg`), mixed competitive tasks (`mappo`), or non-monotonic coordination.",
+      "hyperparam_intuition": {
+        "mixing_embed_dim": "Hidden width of hypernetwork mixer conditioning on global state.",
+        "target_update_freq": "Target sync interval for both agent Q-net and mixer.",
+        "lr": "Adam step size."
+      },
+      "extension_hooks": [
+        "Add RNN/GRU into per-agent Q_i(tau_i, a_i) for POMDP SMAC-style coordination",
+        "Switch to on-policy PPO with centralized critic -> `mappo`"
+      ],
+      "module_path": "wannado.drl.algos.multi_agent.qmix_rashid2018",
+      "default_optimizations": [],
+      "citation": {
+        "key": "rashid2018qmix",
+        "title": "QMIX: Monotonic Value Function Factorisation for Deep Multi-Agent Reinforcement Learning",
+        "authors": "Tabish Rashid, Mikayel Samvelyan, Christian Schroeder de Witt, Gregory Farquhar, Jakob Foerster, and Shimon Whiteson",
+        "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+        "year": 2018,
+        "url": "https://proceedings.mlr.press/v80/rashid18a.html",
+        "bibtex": "@inproceedings{rashid2018qmix,\n  title={QMIX: Monotonic Value Function Factorisation for Deep Multi-Agent Reinforcement Learning},\n  author={Rashid, Tabish and Samvelyan, Mikayel and de Witt, Christian Schroeder and Farquhar, Gregory and Foerster, Jakob and Whiteson, Shimon},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/rashid18a.html}\n}",
+        "ieee": "T. Rashid et al., \"QMIX: Monotonic value function factorisation for deep multi-agent reinforcement learning,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 80, 2018.",
+        "apa": "Rashid, T., Samvelyan, M., de Witt, C. S., Farquhar, G., Foerster, J., & Whiteson, S. (2018). QMIX: Monotonic value function factorisation for deep multi-agent reinforcement learning. ICML (PMLR 80)."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "vdn",
+      "name": "Value-Decomposition Networks (VDN)",
+      "family": "multi_agent",
+      "paradigm": "multi_agent_ctde",
+      "tier": "B",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "multi_agent_discrete"
+      ],
+      "env_modalities": [
+        "multi_agent"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "dqn",
+      "diff_from_parent": "Decomposes team Q_tot as sum_i Q_i(o_i, a_i) across decentralized discrete agents.",
+      "summary_plain": "Teaches cooperative multi-agent teams by splitting team rewards across agents additively.",
+      "when_to_use": "Cooperative discrete multi-agent games as a clean baseline before trying `qmix` or `mappo`.",
+      "when_not_to_use": "Non-additive coordination requiring global context (`qmix`), continuous actions (`maddpg`), or competitive games (`mappo`).",
+      "hyperparam_intuition": {
+        "lr": "Adam step size for shared agent Q-network.",
+        "gamma": "Team reward discount factor.",
+        "target_update_freq": "Target network sync interval."
+      },
+      "extension_hooks": [
+        "Replace sum(Q_i) with state-conditioned monotonic hypernetwork -> `qmix`"
+      ],
+      "module_path": "wannado.drl.algos.multi_agent.vdn_sunehag2018",
+      "default_optimizations": [],
+      "citation": {
+        "key": "sunehag2018value",
+        "title": "Value-Decomposition Networks For Cooperative Multi-Agent Learning Based On Team Reward",
+        "authors": "Peter Sunehag, Guy Lever, Audrunas Gruslys, Wojciech Marian Czarnecki, Vinicius Zambaldi, Max Jaderberg, Marc Lanctot, Nicolas Sonnerat, Joel Z. Leibo, Karl Tuyls, and Thore Graepel",
+        "venue": "Proceedings of the 17th International Conference on Autonomous Agents and MultiAgent Systems (AAMAS)",
+        "year": 2018,
+        "url": "https://arxiv.org/abs/1706.05296",
+        "bibtex": "@inproceedings{sunehag2018value,\n  title={Value-Decomposition Networks For Cooperative Multi-Agent Learning Based On Team Reward},\n  author={Sunehag, Peter and Lever, Guy and Gruslys, Audrunas and Czarnecki, Wojciech Marian and Zambaldi, Vinicius and Jaderberg, Max and Lanctot, Marc and Sonnerat, Nicolas and Leibo, Joel Z. and Tuyls, Karl and Graepel, Thore},\n  booktitle={Proceedings of the International Conference on Autonomous Agents and MultiAgent Systems (AAMAS)},\n  year={2018},\n  url={https://arxiv.org/abs/1706.05296}\n}",
+        "ieee": "P. Sunehag et al., \"Value-decomposition networks for cooperative multi-agent learning based on team reward,\" in Proc. AAMAS, 2018.",
+        "apa": "Sunehag, P., Lever, G., Gruslys, A., Czarnecki, W. M., Zambaldi, V., Jaderberg, M., Lanctot, M., Sonnerat, N., Leibo, J. Z., Tuyls, K., & Graepel, T. (2018). Value-decomposition networks for cooperative multi-agent learning based on team reward. AAMAS."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "mappo",
+      "name": "Multi-Agent PPO (MAPPO)",
+      "family": "multi_agent",
+      "paradigm": "multi_agent_ctde",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "multi_agent_discrete",
+        "multi_agent_continuous"
+      ],
+      "env_modalities": [
+        "multi_agent"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "ppo",
+      "diff_from_parent": "Pairs decentralized local-observation actors with a centralized global-state critic under CTDE.",
+      "summary_plain": "Gold-standard on-policy MARL algorithm; easy to tune and handles both discrete and continuous multi-agent teams.",
+      "when_to_use": "Cooperative or mixed multi-agent tasks when simulator steps are fast and stability matters.",
+      "when_not_to_use": "Ultra-slow simulators requiring replay reuse (`qmix`/`maddpg`) or single-agent tasks (`ppo`).",
+      "hyperparam_intuition": {
+        "clip_coef": "PPO policy trust-region clip width.",
+        "n_steps": "Joint steps collected per rollout update.",
+        "share_parameters": "Share actor weights across homogeneous agents (with one-hot ID) for faster convergence."
+      },
+      "extension_hooks": [
+        "Disable `share_parameters` for heterogeneous agent action/observation roles",
+        "Add agent-specific local + global state concatenation in centralized critic"
+      ],
+      "module_path": "wannado.drl.algos.multi_agent.mappo_yu2022",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip"
+      ],
+      "citation": {
+        "key": "yu2022surprising",
+        "title": "The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games",
+        "authors": "Chao Yu, Akash Velu, Eugene Vinitsky, Jiaxuan Gao, Yu Wang, Alexandre Bayen, and Yi Wu",
+        "venue": "Advances in Neural Information Processing Systems (NeurIPS), Datasets and Benchmarks Track",
+        "year": 2022,
+        "url": "https://arxiv.org/abs/2103.01955",
+        "bibtex": "@inproceedings{yu2022surprising,\n  title={The Surprising Effectiveness of PPO in Cooperative Multi-Agent Games},\n  author={Yu, Chao and Velu, Akash and Vinitsky, Eugene and Gao, Jiaxuan and Wang, Yu and Bayen, Alexandre and Wu, Yi},\n  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},\n  year={2022},\n  url={https://arxiv.org/abs/2103.01955}\n}",
+        "ieee": "C. Yu et al., \"The surprising effectiveness of PPO in cooperative multi-agent games,\" in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2022.",
+        "apa": "Yu, C., Velu, A., Vinitsky, E., Gao, J., Wang, Y., Bayen, A., & Wu, Y. (2022). The surprising effectiveness of PPO in cooperative multi-agent games. NeurIPS."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        }
+      ]
+    },
+    {
+      "id": "cql",
+      "name": "Conservative Q-Learning (CQL)",
+      "family": "offline_rl",
+      "paradigm": "offline",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "offline_rl",
+        "discrete_control",
+        "continuous_control"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "sac",
+      "diff_from_parent": "Adds conservative log-sum-exp Q-penalty so static offline datasets never over-estimate unseen OOD actions.",
+      "summary_plain": "Learns safely from logged historical datasets without live interaction by penalizing untested actions.",
+      "when_to_use": "Zero online exploration allowed (only static trajectories/logs exist) and dataset quality is mixed.",
+      "when_not_to_use": "Online interaction is cheap and safe (`sac`/`ppo`) or you want simpler hyperparameter tuning (`iql_offline`).",
+      "hyperparam_intuition": {
+        "cql_alpha": "Strength of penalty pushing down Q-values on unseen out-of-distribution actions.",
+        "num_grad_steps": "Number of offline minibatch gradient updates over the static dataset.",
+        "gamma": "Discount horizon."
+      },
+      "extension_hooks": [
+        "Add automatic Lagrange dual alpha_cql targeting fixed Q-gap",
+        "Replace log-sum-exp penalty with in-sample expectile regression -> `iql_offline`"
+      ],
+      "module_path": "wannado.drl.algos.offline_rl.cql_kumar2020",
+      "default_optimizations": [
+        "clipped_double_q"
+      ],
+      "citation": {
+        "key": "kumar2020conservative",
+        "title": "Conservative Q-Learning for Offline Reinforcement Learning",
+        "authors": "Aviral Kumar, Aurick Zhou, George Tucker, and Sergey Levine",
+        "venue": "Advances in Neural Information Processing Systems (NeurIPS)",
+        "year": 2020,
+        "url": "https://arxiv.org/abs/2006.04779",
+        "bibtex": "@inproceedings{kumar2020conservative,\n  title={Conservative Q-Learning for Offline Reinforcement Learning},\n  author={Kumar, Aviral and Zhou, Aurick and Tucker, George and Levine, Sergey},\n  booktitle={Advances in Neural Information Processing Systems (NeurIPS)},\n  year={2020},\n  url={https://arxiv.org/abs/2006.04779}\n}",
+        "ieee": "A. Kumar, A. Zhou, G. Tucker, and S. Levine, \"Conservative Q-learning for offline reinforcement learning,\" in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2020.",
+        "apa": "Kumar, A., Zhou, A., Tucker, G., & Levine, S. (2020). Conservative Q-learning for offline reinforcement learning. NeurIPS."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        }
+      ]
+    },
+    {
+      "id": "iql_offline",
+      "name": "Implicit Q-Learning (IQL)",
+      "family": "offline_rl",
+      "paradigm": "offline",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "offline_rl",
+        "discrete_control",
+        "continuous_control"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "cql",
+      "diff_from_parent": "Replaces OOD action penalization with in-sample expectile V(s) regression + Advantage-Weighted Regression (AWR).",
+      "summary_plain": "Learns purely from logged datasets without ever querying unseen actions; fast and very stable.",
+      "when_to_use": "Preferred default for static offline datasets where CQL hyperparameter tuning feels brittle.",
+      "when_not_to_use": "Online environments where live exploration is allowed (`ppo`/`sac`) or multi-agent systems (`mappo`).",
+      "hyperparam_intuition": {
+        "expectile": "Asymmetry parameter (0.7-0.8) steering V(s) toward the upper tail of dataset actions.",
+        "awr_beta": "Inverse temperature controlling how sharply policy extraction favors high-advantage actions.",
+        "num_grad_steps": "Offline gradient iterations over logged transitions."
+      },
+      "extension_hooks": [
+        "Swap Gaussian AWR actor for diffusion/flow behavior policy",
+        "Fine-tune online after offline pretraining using `sac`"
+      ],
+      "module_path": "wannado.drl.algos.offline_rl.iql_kostrikov2022",
+      "default_optimizations": [
+        "clipped_double_q"
+      ],
+      "citation": {
+        "key": "kostrikov2022offline",
+        "title": "Offline Reinforcement Learning with Implicit Q-Learning",
+        "authors": "Ilya Kostrikov, Ashvin Nair, and Sergey Levine",
+        "venue": "International Conference on Learning Representations (ICLR)",
+        "year": 2022,
+        "url": "https://arxiv.org/abs/2110.06169",
+        "bibtex": "@inproceedings{kostrikov2022offline,\n  title={Offline Reinforcement Learning with Implicit Q-Learning},\n  author={Kostrikov, Ilya and Nair, Ashvin and Levine, Sergey},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2022},\n  url={https://arxiv.org/abs/2110.06169}\n}",
+        "ieee": "I. Kostrikov, A. Nair, and S. Levine, \"Offline reinforcement learning with implicit Q-learning,\" in Proc. Int. Conf. Learn. Represent. (ICLR), 2022.",
+        "apa": "Kostrikov, I., Nair, A., & Levine, S. (2022). Offline reinforcement learning with implicit Q-learning. ICLR."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        }
+      ]
+    },
+    {
+      "id": "reinforce",
+      "name": "REINFORCE (Monte Carlo Policy Gradient)",
+      "family": "policy_gradient",
+      "paradigm": "on_policy",
+      "tier": "C",
+      "on_policy": true,
+      "sample_efficiency": "low",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": null,
+      "diff_from_parent": "Origin node of neural policy-gradient RL: optimizes log pi(a|s) weighted by episodic returns.",
+      "summary_plain": "Classic policy-gradient baseline that boosts action probabilities along entire finished episodes.",
+      "when_to_use": "Teaching policy gradients, simple episodic tasks, or verifying gradient flow before scaling to PPO.",
+      "when_not_to_use": "Long horizons, noisy rewards, or sample-constrained tasks (high variance; upgrade to `a2c` or `ppo`).",
+      "hyperparam_intuition": {
+        "lr": "Policy optimizer step size; too high causes premature deterministic collapse.",
+        "gamma": "Discount horizon weighting future rewards.",
+        "use_baseline": "Subtracts a learned state-value baseline V(s) to slash gradient variance without adding bias."
+      },
+      "extension_hooks": [
+        "Replace full return G_t with bootstrapped GAE -> `a2c` / `ppo`",
+        "Add group-relative reward normalization across K rollouts -> `grpo`"
+      ],
+      "module_path": "wannado.drl.algos.policy_gradient.reinforce_williams1992",
+      "default_optimizations": [],
+      "citation": {
+        "key": "williams1992simple",
+        "title": "Simple statistical gradient-following algorithms for connectionist reinforcement learning",
+        "authors": "Ronald J. Williams",
+        "venue": "Machine Learning, vol. 8, no. 3-4, pp. 229-256",
+        "year": 1992,
+        "url": "https://doi.org/10.1007/BF00992696",
+        "bibtex": "@article{williams1992simple,\n  title={Simple statistical gradient-following algorithms for connectionist reinforcement learning},\n  author={Williams, Ronald J.},\n  journal={Machine Learning},\n  volume={8},\n  number={3-4},\n  pages={229--256},\n  year={1992},\n  doi={10.1007/BF00992696}\n}",
+        "ieee": "R. J. Williams, \"Simple statistical gradient-following algorithms for connectionist reinforcement learning,\" Machine Learning, vol. 8, no. 3-4, pp. 229-256, 1992.",
+        "apa": "Williams, R. J. (1992). Simple statistical gradient-following algorithms for connectionist reinforcement learning. Machine Learning, 8(3-4), 229-256."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "trpo",
+      "name": "Trust Region Policy Optimization (TRPO)",
+      "family": "policy_gradient",
+      "paradigm": "on_policy",
+      "tier": "A",
+      "on_policy": true,
+      "sample_efficiency": "low",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "reinforce",
+      "diff_from_parent": "Enforces monotonic KL trust-region constraints via Conjugate Gradient Fisher-vector products and line search.",
+      "summary_plain": "Second-order policy gradient ensuring every update stays inside a mathematically safe KL trust region.",
+      "when_to_use": "Studying policy trust-region theory or sensitive control tasks needing strict KL guarantees.",
+      "when_not_to_use": "Large vision/sequence networks where Hessian-vector products are too slow (`ppo` achieves similar stability with first-order updates).",
+      "hyperparam_intuition": {
+        "max_kl": "Hard KL divergence radius allowed per policy step (0.01 = conservative trust region).",
+        "cg_iters": "Conjugate Gradient iterations approximating F^{-1} g.",
+        "n_steps": "Batch size per trust-region update; larger batches give cleaner Fisher curvature."
+      },
+      "extension_hooks": [
+        "Replace CG + backtracking line search with clipped surrogate -> `ppo`"
+      ],
+      "module_path": "wannado.drl.algos.policy_gradient.trpo_schulman2015",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip"
+      ],
+      "citation": {
+        "key": "schulman2015trust",
+        "title": "Trust Region Policy Optimization",
+        "authors": "John Schulman, Sergey Levine, Philipp Moritz, Michael I. Jordan, and Pieter Abbeel",
+        "venue": "Proceedings of the 32nd International Conference on Machine Learning (ICML), PMLR 37",
+        "year": 2015,
+        "url": "http://proceedings.mlr.press/v37/schulman15.html",
+        "bibtex": "@inproceedings{schulman2015trust,\n  title={Trust Region Policy Optimization},\n  author={Schulman, John and Levine, Sergey and Moritz, Philipp and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={37},\n  year={2015},\n  url={http://proceedings.mlr.press/v37/schulman15.html}\n}",
+        "ieee": "J. Schulman, S. Levine, P. Moritz, M. I. Jordan, and P. Abbeel, \"Trust region policy optimization,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 37, 2015.",
+        "apa": "Schulman, J., Levine, S., Moritz, P., Jordan, M. I., & Abbeel, P. (2015). Trust region policy optimization. ICML (PMLR 37)."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        }
+      ]
+    },
+    {
+      "id": "a2c",
+      "name": "Advantage Actor-Critic (A2C)",
+      "family": "policy_gradient",
+      "paradigm": "on_policy",
+      "tier": "B",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "reinforce",
+      "diff_from_parent": "Uses n-step bootstrapped GAE advantages from a Critic V(s) so updates happen mid-episode with much lower variance.",
+      "summary_plain": "Fast, lightweight synchronous Actor-Critic updating every n steps without waiting for episodes to finish.",
+      "when_to_use": "Fast environments needing an immediate upgrade over REINFORCE or lightweight on-policy baseline.",
+      "when_not_to_use": "Complex tasks where policy steps overshoot and collapse (prefer `ppo` with clipped ratios).",
+      "hyperparam_intuition": {
+        "n_steps": "Rollout horizon before each Actor-Critic update (longer = less bias, more variance).",
+        "ent_coef": "Bonus discouraging premature greedy determinism.",
+        "vf_coef": "Weight balancing Critic value loss against Actor policy loss."
+      },
+      "extension_hooks": [
+        "Add PPO clipped surrogate objective over multi-epoch minibatches -> `ppo`",
+        "Replace hand-written advantage target with learned meta-update network -> `discorl`"
+      ],
+      "module_path": "wannado.drl.algos.policy_gradient.a2c_mnih2016",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip"
+      ],
+      "citation": {
+        "key": "mnih2016asynchronous",
+        "title": "Asynchronous Methods for Deep Reinforcement Learning",
+        "authors": "Volodymyr Mnih, Adria Puigdomenech Badia, Mehdi Mirza, Alex Graves, Timothy P. Lillicrap, Tim Harley, David Silver, and Koray Kavukcuoglu",
+        "venue": "Proceedings of the 33rd International Conference on Machine Learning (ICML), PMLR 48",
+        "year": 2016,
+        "url": "http://proceedings.mlr.press/v48/mnih16.html",
+        "bibtex": "@inproceedings{mnih2016asynchronous,\n  title={Asynchronous Methods for Deep Reinforcement Learning},\n  author={Mnih, Volodymyr and Badia, Adri{\\`a} Puigdom{\\`e}nech and Mirza, Mehdi and Graves, Alex and Lillicrap, Timothy P. and Harley, Tim and Silver, David and Kavukcuoglu, Koray},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={48},\n  year={2016},\n  url={http://proceedings.mlr.press/v48/mnih16.html}\n}",
+        "ieee": "V. Mnih et al., \"Asynchronous methods for deep reinforcement learning,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 48, 2016.",
+        "apa": "Mnih, V., Badia, A. P., Mirza, M., Graves, A., Lillicrap, T., Harley, T., Silver, D., & Kavukcuoglu, K. (2016). Asynchronous methods for deep reinforcement learning. ICML (PMLR 48)."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ppo",
+      "name": "Proximal Policy Optimization (PPO-Clip)",
+      "family": "policy_gradient",
+      "paradigm": "on_policy",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "trpo",
+      "diff_from_parent": "Replaces second-order Fisher KL trust region with first-order clipped surrogate objective + minibatch epochs.",
+      "summary_plain": "Reliable default workhorse for both discrete (with action masking) and continuous control.",
+      "when_to_use": "First-try online DRL benchmark when simulator speed is reasonable and stability matters most.",
+      "when_not_to_use": "Expensive slow simulators needing maximal sample reuse (`sac`/`td3`), partial observability (`ppo_gru`), or offline logs (`iql_offline`).",
+      "hyperparam_intuition": {
+        "clip_coef": "Trust-region clip width (0.2 keeps policy changes conservative per batch).",
+        "n_steps": "Steps collected before each policy update batch.",
+        "ent_coef": "Exploration curiosity weight preventing premature greedy collapse.",
+        "gamma": "Future reward discount horizon."
+      },
+      "extension_hooks": [
+        "Add GRU state recurrence across episode steps -> `ppo_gru`",
+        "Add asymmetric Clip-Higher (eps_low vs eps_high) -> `dapo`-style exploration preservation",
+        "Use centralized global state in critic for N agents -> `mappo`"
+      ],
+      "module_path": "wannado.drl.algos.policy_gradient.ppo_schulman2017",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip"
+      ],
+      "citation": {
+        "key": "schulman2017proximal",
+        "title": "Proximal Policy Optimization Algorithms",
+        "authors": "John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov",
+        "venue": "arXiv preprint arXiv:1707.06347",
+        "year": 2017,
+        "url": "https://arxiv.org/abs/1707.06347",
+        "bibtex": "@article{schulman2017proximal,\n  title={Proximal Policy Optimization Algorithms},\n  author={Schulman, John and Wolski, Filip and Dhariwal, Prafulla and Radford, Alec and Klimov, Oleg},\n  journal={arXiv preprint arXiv:1707.06347},\n  year={2017},\n  url={https://arxiv.org/abs/1707.06347}\n}",
+        "ieee": "J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, \"Proximal policy optimization algorithms,\" arXiv:1707.06347, 2017.",
+        "apa": "Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017). Proximal policy optimization algorithms. arXiv:1707.06347."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ppo_gru",
+      "name": "Recurrent PPO (PPO-GRU for POMDP)",
+      "family": "policy_gradient",
+      "paradigm": "on_policy",
+      "tier": "A",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "pomdp",
+        "discrete_control",
+        "continuous_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": true,
+      "parent_id": "ppo",
+      "diff_from_parent": "Adds a GRU memory cell unrolled sequentially with episode-boundary hidden state resets for POMDPs.",
+      "summary_plain": "PPO with short-term working memory (GRU) so agents infer hidden dynamics like velocity or noisy channels.",
+      "when_to_use": "Stage 0 identifies partial observability (missing velocity, occluded sensors, delayed feedback).",
+      "when_not_to_use": "Fully Markovian environments where single-frame observations already contain complete state (use `ppo`).",
+      "hyperparam_intuition": {
+        "n_steps": "Sequence rollout chunk length for truncated backpropagation through time.",
+        "hidden_dim": "GRU memory capacity (64-128 for compact control/wireless tasks).",
+        "clip_coef": "PPO trust-region clip width."
+      },
+      "extension_hooks": [
+        "Swap GRU cell for causal Transformer block",
+        "Add belief-state prediction loss to supervise latent GRU state h_t"
+      ],
+      "module_path": "wannado.drl.algos.policy_gradient.ppo_gru_schulman2017",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip",
+        "gru_memory"
+      ],
+      "citation": {
+        "key": "schulman2017proximal_gru",
+        "title": "Proximal Policy Optimization Algorithms",
+        "authors": "John Schulman, Filip Wolski, Prafulla Dhariwal, Alec Radford, and Oleg Klimov",
+        "venue": "arXiv preprint arXiv:1707.06347 (Recurrent GRU POMDP variant)",
+        "year": 2017,
+        "url": "https://arxiv.org/abs/1707.06347",
+        "bibtex": "@article{schulman2017proximal_gru,\n  title={Proximal Policy Optimization Algorithms},\n  author={Schulman, John and Wolski, Filip and Dhariwal, Prafulla and Radford, Alec and Klimov, Oleg},\n  journal={arXiv preprint arXiv:1707.06347},\n  year={2017},\n  url={https://arxiv.org/abs/1707.06347}\n}",
+        "ieee": "J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, \"Proximal policy optimization algorithms,\" arXiv:1707.06347, 2017.",
+        "apa": "Schulman, J., Wolski, F., Dhariwal, P., Radford, A., & Klimov, O. (2017). Proximal policy optimization algorithms. arXiv:1707.06347."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        },
+        {
+          "id": "gru_memory",
+          "name": "Gated Recurrent Unit (GRU) Temporal Memory",
+          "role_plain": "Recurrent gated state encoder tracking partial observability and backward meta-update rollouts.",
+          "citation": {
+            "key": "cho2014learning",
+            "title": "Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation",
+            "authors": "Kyunghyun Cho, Bart van Merrienboer, Caglar Gulcehre, Dzmitry Bahdanau, Fethi Bougares, Holger Schwenk, and Yoshua Bengio",
+            "venue": "Proceedings of the 2014 Conference on Empirical Methods in Natural Language Processing (EMNLP)",
+            "year": 2014,
+            "url": "https://arxiv.org/abs/1406.1078",
+            "bibtex": "@inproceedings{cho2014learning,\n  title={Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation},\n  author={Cho, Kyunghyun and van Merri{\\\"e}nboer, Bart and Gulcehre, Caglar and Bahdanau, Dzmitry and Bougares, Fethi and Schwenk, Holger and Bengio, Yoshua},\n  booktitle={Proceedings of EMNLP},\n  year={2014},\n  url={https://arxiv.org/abs/1406.1078}\n}",
+            "ieee": "K. Cho et al., \"Learning phrase representations using RNN encoder-decoder for statistical machine translation,\" in Proc. EMNLP, 2014.",
+            "apa": "Cho, K., van Merrienboer, B., Gulcehre, C., Bahdanau, D., Bougares, F., Schwenk, H., & Bengio, Y. (2014). Learning phrase representations using RNN encoder-decoder for statistical machine translation. EMNLP."
+          }
+        }
+      ]
+    },
+    {
+      "id": "q_learning",
+      "name": "Tabular Q-Learning",
+      "family": "tabular_classic",
+      "paradigm": "tabular_off_policy",
+      "tier": "B",
+      "on_policy": false,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "tabular",
+        "discrete_control"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "sarsa",
+      "diff_from_parent": "Switches SARSA's on-policy target Q(s', a') to off-policy greedy Bellman max_{a'} Q(s', a').",
+      "summary_plain": "Classic off-policy Q-table algorithm; foundational ancestor of DQN, Double DQN, QMIX, and CQL.",
+      "when_to_use": "Small discrete gridworlds, teaching value-based RL, or rapid tabular sanity baselines.",
+      "when_not_to_use": "Large/continuous state spaces (discretization suffers curse of dimensionality; switch to `dqn` or `ppo`).",
+      "hyperparam_intuition": {
+        "alpha": "Step size updating Q-table entries from each transition.",
+        "gamma": "Discount factor determining planning horizon.",
+        "eps_start": "Exploratory randomness before converging to greedy action selection."
+      },
+      "extension_hooks": [
+        "Replace Q-table lookup with neural network + ReplayBuffer -> `dqn`",
+        "Maintain Q_A / Q_B tables to avoid maximization bias -> Double Q-Learning"
+      ],
+      "module_path": "wannado.drl.algos.tabular_classic.q_learning_watkins1992",
+      "default_optimizations": [],
+      "citation": {
+        "key": "watkins1992qlearning",
+        "title": "Q-learning",
+        "authors": "Christopher J. C. H. Watkins and Peter Dayan",
+        "venue": "Machine Learning",
+        "year": 1992,
+        "url": "https://doi.org/10.1007/BF00992698",
+        "bibtex": "@article{watkins1992qlearning,\n  title={Q-learning},\n  author={Watkins, Christopher J. C. H. and Dayan, Peter},\n  journal={Machine Learning},\n  volume={8},\n  number={3-4},\n  pages={279--292},\n  year={1992},\n  publisher={Springer},\n  doi={10.1007/BF00992698}\n}",
+        "ieee": "C. J. C. H. Watkins and P. Dayan, \"Q-learning,\" Machine Learning, vol. 8, no. 3-4, pp. 279-292, 1992.",
+        "apa": "Watkins, C. J. C. H., & Dayan, P. (1992). Q-learning. Machine Learning, 8(3-4), 279-292."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "sarsa",
+      "name": "SARSA (On-Policy TD Control)",
+      "family": "tabular_classic",
+      "paradigm": "tabular_on_policy",
+      "tier": "C",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "tabular",
+        "discrete_control"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "monte_carlo",
+      "diff_from_parent": "Replaces full-episode Monte Carlo returns with 1-step on-policy TD bootstrapping Q(s', a').",
+      "summary_plain": "Step-by-step on-policy Q-table learning that prices in exploration risk (safer near cliffs than Q-Learning).",
+      "when_to_use": "Learning TD fundamentals or small discrete environments where exploratory mistakes are very costly.",
+      "when_not_to_use": "High-dimensional continuous states or when seeking pure optimal greedy path regardless of exploration (use `q_learning` or `dqn`).",
+      "hyperparam_intuition": {
+        "alpha": "Learning rate controlling how fast new TD errors overwrite old Q-table estimates.",
+        "gamma": "Discount factor balancing immediate safety vs long-term reward.",
+        "eps_start": "Initial exploration rate decaying toward eps_end."
+      },
+      "extension_hooks": [
+        "Swap Q(s', a') for max_{a'} Q(s', a') -> `q_learning`",
+        "Replace greedy next-action sample with expectation over policy probabilities -> Expected SARSA"
+      ],
+      "module_path": "wannado.drl.algos.tabular_classic.sarsa_rummery1994",
+      "default_optimizations": [],
+      "citation": {
+        "key": "rummery1994online",
+        "title": "On-line Q-learning using connectionist systems",
+        "authors": "Gavin A. Rummery and Mahesan Niranjan",
+        "venue": "Cambridge University Engineering Department, Technical Report CUED/F-INFENG/TR 166",
+        "year": 1994,
+        "url": "https://mi.eng.cam.ac.uk/reports/svr-ftp/auto-pdf/rummery_tr166.pdf",
+        "bibtex": "@techreport{rummery1994online,\n  title={On-line Q-learning using connectionist systems},\n  author={Rummery, Gavin A. and Niranjan, Mahesan},\n  institution={Cambridge University Engineering Department},\n  number={CUED/F-INFENG/TR 166},\n  year={1994}\n}",
+        "ieee": "G. A. Rummery and M. Niranjan, \"On-line Q-learning using connectionist systems,\" Cambridge Univ. Eng. Dept., Tech. Rep. CUED/F-INFENG/TR 166, 1994.",
+        "apa": "Rummery, G. A., & Niranjan, M. (1994). On-line Q-learning using connectionist systems (Tech. Rep. CUED/F-INFENG/TR 166). Cambridge University Engineering Department."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "monte_carlo",
+      "name": "First-Visit Monte Carlo Control",
+      "family": "tabular_classic",
+      "paradigm": "tabular_on_policy",
+      "tier": "C",
+      "on_policy": true,
+      "sample_efficiency": "low",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "tabular",
+        "discrete_control"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": null,
+      "diff_from_parent": "Foundational tabular episodic baseline: averages complete episode returns G_t without bootstrapping.",
+      "summary_plain": "Learns action values from complete finished episodes with zero bootstrapping; ideal for learning RL fundamentals.",
+      "when_to_use": "Small discrete/discretized episodic tasks, teaching/debugging RL basics, or non-Markovian episodic benchmarks.",
+      "when_not_to_use": "Continuous control, infinite-horizon streaming tasks, or high-dimensional observations (use DQN or PPO).",
+      "hyperparam_intuition": {
+        "gamma": "How much future rewards matter relative to immediate rewards (0.99 = far-sighted).",
+        "eps_start": "Starting exploration probability so the agent tries unseen moves early on.",
+        "alpha": "Step size (or 1/N visit count when None) controlling how fast Q-table values move."
+      },
+      "extension_hooks": [
+        "Swap full return G_t for 1-step on-policy TD target -> `sarsa`",
+        "Add off-policy weighted importance sampling ratio rho_{t:T-1}"
+      ],
+      "module_path": "wannado.drl.algos.tabular_classic.monte_carlo_sutton2018",
+      "default_optimizations": [],
+      "citation": {
+        "key": "sutton2018reinforcement",
+        "title": "Reinforcement Learning: An Introduction (2nd ed.)",
+        "authors": "Richard S. Sutton and Andrew G. Barto",
+        "venue": "MIT Press",
+        "year": 2018,
+        "url": "https://incompleteideas.net/book/the-book-2nd.html",
+        "bibtex": "@book{sutton2018reinforcement,\n  title={Reinforcement Learning: An Introduction},\n  author={Sutton, Richard S. and Barto, Andrew G.},\n  edition={2nd},\n  year={2018},\n  publisher={MIT Press},\n  url={https://incompleteideas.net/book/the-book-2nd.html}\n}",
+        "ieee": "R. S. Sutton and A. G. Barto, \"Reinforcement Learning: An Introduction,\" 2nd ed., MIT Press, 2018.",
+        "apa": "Sutton, R. S., & Barto, A. G. (2018). Reinforcement learning: An introduction (2nd ed.). MIT Press."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "dqn",
+      "name": "Deep Q-Network (DQN)",
+      "family": "value_based",
+      "paradigm": "off_policy",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "q_learning",
+      "diff_from_parent": "Replaces Q-table with neural network, circular Experience Replay, and target Q-network.",
+      "summary_plain": "Learns Q-values via neural network + replay memory; standard starting point for discrete deep RL.",
+      "when_to_use": "Discrete action spaces with continuous/high-dimensional state vectors where replay efficiency helps.",
+      "when_not_to_use": "Continuous Box actions (use `sac` or `td3`) or large action branching (consider `ppo`).",
+      "hyperparam_intuition": {
+        "lr": "Adam step size for Q-network updates.",
+        "buffer_size": "How many past transitions stay in replay memory.",
+        "target_update_freq": "How often target network weights sync to prevent moving-target oscillations."
+      },
+      "extension_hooks": [
+        "Decouple online argmax from target evaluation -> `double_dqn`",
+        "Decompose Q into V(s) + centered A(s, a) -> `dueling_dqn`",
+        "Add Prioritized Experience Replay weights from |TD error|"
+      ],
+      "module_path": "wannado.drl.algos.value_based.dqn_mnih2015",
+      "default_optimizations": [],
+      "citation": {
+        "key": "mnih2015human",
+        "title": "Human-level control through deep reinforcement learning",
+        "authors": "Volodymyr Mnih, Koray Kavukcuoglu, David Silver, et al.",
+        "venue": "Nature, vol. 518, no. 7540, pp. 529-533",
+        "year": 2015,
+        "url": "https://doi.org/10.1038/nature14236",
+        "bibtex": "@article{mnih2015human,\n  title={Human-level control through deep reinforcement learning},\n  author={Mnih, Volodymyr and Kavukcuoglu, Koray and Silver, David and others},\n  journal={Nature},\n  volume={518},\n  number={7540},\n  pages={529--533},\n  year={2015},\n  doi={10.1038/nature14236}\n}",
+        "ieee": "V. Mnih et al., \"Human-level control through deep reinforcement learning,\" Nature, vol. 518, no. 7540, pp. 529-533, 2015.",
+        "apa": "Mnih, V., Kavukcuoglu, K., Silver, D., et al. (2015). Human-level control through deep reinforcement learning. Nature, 518(7540), 529-533."
+      },
+      "optimization_citations": []
+    },
+    {
+      "id": "double_dqn",
+      "name": "Double Deep Q-Network (Double DQN)",
+      "family": "value_based",
+      "paradigm": "off_policy",
+      "tier": "A",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "dqn",
+      "diff_from_parent": "Decouples next-action argmax selection (online net) from Q-value evaluation (target net).",
+      "summary_plain": "Fixes DQN's over-optimistic Q-value inflation with a one-line target decoupling change.",
+      "when_to_use": "Drop-in upgrade over vanilla DQN whenever discrete Q-values overshoot or fluctuate.",
+      "when_not_to_use": "Continuous action tasks (use `td3` or `sac`) or tasks needing state-value separation (`dueling_dqn`).",
+      "hyperparam_intuition": {
+        "lr": "Optimizer learning rate for Q-network updates.",
+        "target_update_freq": "Target sync interval; larger values stabilize Bellman targets.",
+        "gamma": "Discount horizon weighting future vs immediate rewards."
+      },
+      "extension_hooks": [
+        "Swap QNetwork to DuelingQNetwork -> `dueling_dqn`",
+        "Add n-step TD returns inside replay buffer"
+      ],
+      "module_path": "wannado.drl.algos.value_based.double_dqn_hasselt2016",
+      "default_optimizations": [
+        "double_q_target"
+      ],
+      "citation": {
+        "key": "vanhasselt2016deep",
+        "title": "Deep Reinforcement Learning with Double Q-learning",
+        "authors": "Hado van Hasselt, Arthur Guez, and David Silver",
+        "venue": "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)",
+        "year": 2016,
+        "url": "https://arxiv.org/abs/1509.06461",
+        "bibtex": "@inproceedings{vanhasselt2016deep,\n  title={Deep Reinforcement Learning with Double Q-learning},\n  author={van Hasselt, Hado and Guez, Arthur and Silver, David},\n  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},\n  year={2016},\n  url={https://arxiv.org/abs/1509.06461}\n}",
+        "ieee": "H. van Hasselt, A. Guez, and D. Silver, \"Deep reinforcement learning with double Q-learning,\" in Proc. AAAI Conf. Artif. Intell., 2016.",
+        "apa": "van Hasselt, H., Guez, A., & Silver, D. (2016). Deep reinforcement learning with double Q-learning. Proceedings of the AAAI Conference on Artificial Intelligence."
+      },
+      "optimization_citations": [
+        {
+          "id": "double_q_target",
+          "name": "Double Q-Learning Target Decoupling",
+          "role_plain": "Decouples greedy next-action selection (online Q) from evaluation (target Q) to suppress maximization bias.",
+          "citation": {
+            "key": "vanhasselt2016deep",
+            "title": "Deep Reinforcement Learning with Double Q-learning",
+            "authors": "Hado van Hasselt, Arthur Guez, and David Silver",
+            "venue": "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1509.06461",
+            "bibtex": "@inproceedings{vanhasselt2016deep,\n  title={Deep Reinforcement Learning with Double Q-learning},\n  author={van Hasselt, Hado and Guez, Arthur and Silver, David},\n  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},\n  year={2016},\n  url={https://arxiv.org/abs/1509.06461}\n}",
+            "ieee": "H. van Hasselt, A. Guez, and D. Silver, \"Deep reinforcement learning with double Q-learning,\" in Proc. AAAI, 2016.",
+            "apa": "van Hasselt, H., Guez, A., & Silver, D. (2016). Deep reinforcement learning with double Q-learning. AAAI."
+          }
+        }
+      ]
+    },
+    {
+      "id": "dueling_dqn",
+      "name": "Dueling Double DQN",
+      "family": "value_based",
+      "paradigm": "off_policy",
+      "tier": "A",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "double_dqn",
+      "diff_from_parent": "Decomposes Q(s,a) into V(s) + (A(s,a) - mean A(s,.)) alongside Double-DQN targets.",
+      "summary_plain": "Separates 'how good is this situation' from 'which action is better', speeding up multi-action discrete learning.",
+      "when_to_use": "Discrete problems with many actions where individual action choices only matter in critical states.",
+      "when_not_to_use": "Continuous action tasks (`sac`/`td3`) or tiny 2-action problems where standard Double DQN already suffices.",
+      "hyperparam_intuition": {
+        "hidden_dim": "Width of shared state trunk and V/A branches.",
+        "target_update_freq": "Target sync interval stabilizing dueling advantage separation.",
+        "lr": "Adam step size."
+      },
+      "extension_hooks": [
+        "Add Prioritized Experience Replay weights w_i = (N * P(i))^{-beta}",
+        "Replace MSE/Huber target with categorical distribution -> `c51`"
+      ],
+      "module_path": "wannado.drl.algos.value_based.dueling_dqn_wang2016",
+      "default_optimizations": [
+        "double_q_target"
+      ],
+      "citation": {
+        "key": "wang2016dueling",
+        "title": "Dueling Network Architectures for Deep Reinforcement Learning",
+        "authors": "Ziyu Wang, Tom Schaul, Matteo Hessel, Hado van Hasselt, Marc Lanctot, and Nando de Freitas",
+        "venue": "Proceedings of the 33rd International Conference on Machine Learning (ICML), PMLR 48",
+        "year": 2016,
+        "url": "https://proceedings.mlr.press/v48/wangf16.html",
+        "bibtex": "@inproceedings{wang2016dueling,\n  title={Dueling Network Architectures for Deep Reinforcement Learning},\n  author={Wang, Ziyu and Schaul, Tom and Hessel, Matteo and van Hasselt, Hado and Lanctot, Marc and de Freitas, Nando},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={48},\n  year={2016},\n  url={https://proceedings.mlr.press/v48/wangf16.html}\n}",
+        "ieee": "Z. Wang et al., \"Dueling network architectures for deep reinforcement learning,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 48, 2016.",
+        "apa": "Wang, Z., Schaul, T., Hessel, M., van Hasselt, H., Lanctot, M., & de Freitas, N. (2016). Dueling network architectures for deep reinforcement learning. ICML (PMLR 48)."
+      },
+      "optimization_citations": [
+        {
+          "id": "double_q_target",
+          "name": "Double Q-Learning Target Decoupling",
+          "role_plain": "Decouples greedy next-action selection (online Q) from evaluation (target Q) to suppress maximization bias.",
+          "citation": {
+            "key": "vanhasselt2016deep",
+            "title": "Deep Reinforcement Learning with Double Q-learning",
+            "authors": "Hado van Hasselt, Arthur Guez, and David Silver",
+            "venue": "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1509.06461",
+            "bibtex": "@inproceedings{vanhasselt2016deep,\n  title={Deep Reinforcement Learning with Double Q-learning},\n  author={van Hasselt, Hado and Guez, Arthur and Silver, David},\n  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},\n  year={2016},\n  url={https://arxiv.org/abs/1509.06461}\n}",
+            "ieee": "H. van Hasselt, A. Guez, and D. Silver, \"Deep reinforcement learning with double Q-learning,\" in Proc. AAAI, 2016.",
+            "apa": "van Hasselt, H., Guez, A., & Silver, D. (2016). Deep reinforcement learning with double Q-learning. AAAI."
+          }
+        }
+      ]
+    },
+    {
+      "id": "c51",
+      "name": "Categorical Distributional DQN (C51)",
+      "family": "value_based",
+      "paradigm": "off_policy",
+      "tier": "A",
+      "on_policy": false,
+      "sample_efficiency": "high",
+      "action_spaces": [
+        "discrete"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "double_dqn",
+      "diff_from_parent": "Learns the full categorical probability distribution over returns (51 atoms) via Cramer projection instead of a scalar Q mean.",
+      "summary_plain": "Predicts the full return distribution (risk + upside histogram) rather than just an average Q-value.",
+      "when_to_use": "Stochastic discrete environments where return variance matters or when exploring risk-sensitive control.",
+      "when_not_to_use": "Continuous control (`sac`) or when true episode returns fall far outside [v_min, v_max].",
+      "hyperparam_intuition": {
+        "v_min": "Lower bound of return support; must cover the worst possible discounted return.",
+        "v_max": "Upper bound of return support; must cover the best possible discounted return.",
+        "n_atoms": "Histogram resolution across [v_min, v_max] (51 is the canonical paper default)."
+      },
+      "extension_hooks": [
+        "Compute CVaR over `probs * atoms` for risk-averse scheduling/finance",
+        "Auto-scale [v_min, v_max] or switch to Quantile Huber loss (QR-DQN)"
+      ],
+      "module_path": "wannado.drl.algos.value_based.c51_bellemare2017",
+      "default_optimizations": [
+        "double_q_target"
+      ],
+      "citation": {
+        "key": "bellemare2017distributional",
+        "title": "A Distributional Perspective on Reinforcement Learning",
+        "authors": "Marc G. Bellemare, Will Dabney, and Remi Munos",
+        "venue": "Proceedings of the 34th International Conference on Machine Learning (ICML), PMLR 70",
+        "year": 2017,
+        "url": "http://proceedings.mlr.press/v70/bellemare17a.html",
+        "bibtex": "@inproceedings{bellemare2017distributional,\n  title={A Distributional Perspective on Reinforcement Learning},\n  author={Bellemare, Marc G. and Dabney, Will and Munos, R{\\'e}mi},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={70},\n  year={2017},\n  url={http://proceedings.mlr.press/v70/bellemare17a.html}\n}",
+        "ieee": "M. G. Bellemare, W. Dabney, and R. Munos, \"A distributional perspective on reinforcement learning,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 70, 2017.",
+        "apa": "Bellemare, M. G., Dabney, W., & Munos, R. (2017). A distributional perspective on reinforcement learning. ICML (PMLR 70)."
+      },
+      "optimization_citations": [
+        {
+          "id": "double_q_target",
+          "name": "Double Q-Learning Target Decoupling",
+          "role_plain": "Decouples greedy next-action selection (online Q) from evaluation (target Q) to suppress maximization bias.",
+          "citation": {
+            "key": "vanhasselt2016deep",
+            "title": "Deep Reinforcement Learning with Double Q-learning",
+            "authors": "Hado van Hasselt, Arthur Guez, and David Silver",
+            "venue": "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1509.06461",
+            "bibtex": "@inproceedings{vanhasselt2016deep,\n  title={Deep Reinforcement Learning with Double Q-learning},\n  author={van Hasselt, Hado and Guez, Arthur and Silver, David},\n  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},\n  year={2016},\n  url={https://arxiv.org/abs/1509.06461}\n}",
+            "ieee": "H. van Hasselt, A. Guez, and D. Silver, \"Deep reinforcement learning with double Q-learning,\" in Proc. AAAI, 2016.",
+            "apa": "van Hasselt, H., Guez, A., & Silver, D. (2016). Deep reinforcement learning with double Q-learning. AAAI."
+          }
+        }
+      ]
+    }
+  ]
+}
