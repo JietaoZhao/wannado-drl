@@ -2,6 +2,12 @@
 
 > Part of the **WannaDo** human–AI collaborative scientific research platform · **Release `v1.0.2`**
 
+[![Version](https://img.shields.io/badge/version-1.0.2-2563eb)](pyproject.toml)
+[![Python](https://img.shields.io/badge/python-3.10%2B-0f766e)](pyproject.toml)
+[![Families](https://img.shields.io/badge/families-7%20RL%20taxonomy-7c3aed)](#7-family-algorithm-taxonomy--verified-lineage-27-algorithms)
+[![Algorithms](https://img.shields.io/badge/executable%20algos-27%20single--file-059669)](#7-family-algorithm-taxonomy--verified-lineage-27-algorithms)
+[![License: MIT](https://img.shields.io/badge/license-MIT-475569)](LICENSE)
+
 *"Wanna do a deep reinforcement learning?"* 
 
 *“Install the library and just say 'I wanna do a deep reinforcement learning for...' to your AI agent”*
