@@ -540,6 +540,7 @@ def evaluate_drl_suite(
     algos: Sequence[str | Callable[..., TrainResult]],
     *,
     seeds: Sequence[int] = (0, 1, 2),
+    min_seeds: int = 3,
     algo_configs: dict[str, Any] | None = None,
     mdp_spec: MDPSpec | None = None,
     heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
@@ -588,7 +589,7 @@ def evaluate_drl_suite(
                 mdp_spec=mdp_spec,
                 random_baseline=rand_base,
                 heuristic_baseline=heur_base,
-                min_seeds=min(3, max(1, len(seeds))),
+                min_seeds=min_seeds,
             )
             if run_audit
             else None

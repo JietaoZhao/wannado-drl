@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import unittest
-from typing import Any
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -150,7 +150,7 @@ class _ContinuousPointGoalEnv(gym.Env):
 class _CoopMultiAgentDiscreteEnv:
     """2-agent cooperative match game: team gets +1.0 when both agents match the hidden target bit."""
 
-    possible_agents = ["a0", "a1"]
+    possible_agents: ClassVar[list[str]] = ["a0", "a1"]
 
     def __init__(self) -> None:
         self._rng = np.random.default_rng(0)
@@ -188,7 +188,7 @@ class _CoopMultiAgentDiscreteEnv:
 class _CoopMultiAgentContinuousEnv:
     """2-agent continuous team tracking: move both scalars toward target signal."""
 
-    possible_agents = ["c0", "c1"]
+    possible_agents: ClassVar[list[str]] = ["c0", "c1"]
 
     def __init__(self) -> None:
         self._rng = np.random.default_rng(0)

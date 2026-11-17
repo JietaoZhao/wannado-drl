@@ -9,9 +9,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
-import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 from wannado.drl.audit.preflight import PreflightReport, preflight_env
 from wannado.drl.catalog.build_catalog import get_taxonomy_tree, load_catalog, query_catalog
@@ -74,8 +73,10 @@ class RuntimeEstimate:
 
     def format_summary(self) -> str:
         lines = [
-            f"[wannado-drl Runtime Forecast] device={self.device}, sim={self.sim_ms_per_step:.3f} ms/step, "
-            f"steps/seed={self.total_timesteps_per_seed:,}, seeds={self.num_seeds}"
+            (
+                f"[wannado-drl Runtime Forecast] device={self.device}, sim={self.sim_ms_per_step:.3f} ms/step, "
+                f"steps/seed={self.total_timesteps_per_seed:,}, seeds={self.num_seeds}"
+            )
         ]
         for aid, sec in self.per_algo_seconds.items():
             lines.append(f"  - {aid:<16s}: ~{sec:.1f}s")
@@ -422,7 +423,7 @@ def explain_parameters(
         preflight_report.action_space_kind if preflight_report is not None else action_space
     )
     horizon_hint = (
-        int(round(preflight_report.summary["mean_episode_length"]))
+        round(preflight_report.summary["mean_episode_length"])
         if preflight_report is not None and preflight_report.summary.get("mean_episode_length")
         else (mdp_spec.termination_spec.truncated_horizon if mdp_spec is not None else 200)
     )
@@ -652,7 +653,7 @@ def build_goal_confirmation_dialog(project_scan: ProjectScan | None = None) -> d
 
 def estimate_runtime(
     env_or_factory: Any | None = None,
-    algos: list[str] | RecommendedAlgoSuite = ("ppo",),
+    algos: Sequence[str] | RecommendedAlgoSuite = ("ppo",),
     *,
     preflight_report: PreflightReport | None = None,
     total_timesteps: int = 20_000,

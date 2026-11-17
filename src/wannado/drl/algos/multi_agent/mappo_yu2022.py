@@ -22,8 +22,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.distributions import Categorical, Normal
 
 from wannado.drl.core.networks import build_mlp
@@ -119,6 +119,17 @@ def train_mappo(
     actor = build_mlp(in_obs_dim, cfg.hidden_dims, env.action_dim, activation=nn.Tanh, orthogonal_init=True, last_std=0.01).to(dev)
     critic = build_mlp(env.state_dim, cfg.hidden_dims, 1, activation=nn.Tanh, orthogonal_init=True, last_std=1.0).to(dev)
     actor_logstd = nn.Parameter(torch.zeros(1, env.action_dim, device=dev)) if not env.is_discrete else None
+    scale_np = np.ones((env.action_dim,), dtype=np.float32)
+    bias_np = np.zeros((env.action_dim,), dtype=np.float32)
+    if not env.is_discrete and env.action_low is not None and env.action_high is not None:
+        lo = np.asarray(env.action_low, dtype=np.float32).reshape(-1)
+        hi = np.asarray(env.action_high, dtype=np.float32).reshape(-1)
+        if lo.shape == (env.action_dim,) and hi.shape == (env.action_dim,):
+            finite = np.isfinite(lo) & np.isfinite(hi) & (hi > lo)
+            scale_np = np.where(finite, 0.5 * (hi - lo), 1.0).astype(np.float32)
+            bias_np = np.where(finite, 0.5 * (hi + lo), 0.0).astype(np.float32)
+    act_scale = torch.as_tensor(scale_np, device=dev, dtype=torch.float32)
+    act_bias = torch.as_tensor(bias_np, device=dev, dtype=torch.float32)
     params = list(actor.parameters()) + list(critic.parameters()) + ([actor_logstd] if actor_logstd is not None else [])
     opt = torch.optim.Adam(params, lr=cfg.lr, eps=1e-5)
 
@@ -127,10 +138,11 @@ def train_mappo(
     ep_ret, ep_idx, steps = 0.0, 0, 0
     learning_curve: list[dict[str, float]] = []
     ent_hist: list[float] = []
+    ev_hist: list[float] = []
 
     while steps < cfg.total_timesteps:
-        b_local, b_states, b_acts, b_lps, b_rews, b_terms, b_vals = [], [], [], [], [], [], []
-        last_term = False
+        b_local, b_states, b_acts, b_lps, b_rews, b_terms, b_dones, b_vals = [], [], [], [], [], [], [], []
+        last_done = False
         for _ in range(cfg.n_steps):
             if steps >= cfg.total_timesteps:
                 break
@@ -147,8 +159,9 @@ def train_mappo(
                     act_np: Any = act_t.cpu().numpy()
                     act_dict = {a: int(act_np[i]) for i, a in enumerate(env.agents)}
                 else:
-                    std = torch.exp(actor_logstd.clamp(-5.0, 2.0)).expand_as(logits_or_mean)  # type: ignore[union-attr]
-                    dist = Normal(logits_or_mean, std)
+                    mean_c = act_bias + act_scale * logits_or_mean
+                    std = act_scale * torch.exp(actor_logstd.clamp(-5.0, 2.0)).expand_as(mean_c)  # type: ignore[union-attr]
+                    dist = Normal(mean_c, std)
                     act_t = dist.sample()
                     lp_t = dist.log_prob(act_t).sum(dim=-1)
                     act_np = act_t.cpu().numpy()
@@ -162,6 +175,14 @@ def train_mappo(
             team_rew = float(np.mean(list(rew_dict.values())))
             any_term = any(term_dict.values())
             any_trunc = any(trunc_dict.values())
+            done_flag = bool(any_term or any_trunc)
+            step_rew = team_rew
+            if any_trunc and not any_term:
+                with torch.no_grad():
+                    trunc_v = float(
+                        critic(torch.as_tensor(next_state, device=dev, dtype=torch.float32).unsqueeze(0)).item()
+                    )
+                step_rew += cfg.gamma * trunc_v
             steps += 1
             ep_ret += team_rew
 
@@ -169,12 +190,13 @@ def train_mappo(
             b_states.append(g_state)
             b_acts.append(act_np)
             b_lps.append(lp_t.cpu().numpy())
-            b_rews.append(team_rew)
+            b_rews.append(step_rew)
             b_terms.append(float(any_term))
+            b_dones.append(float(done_flag))
             b_vals.append(val)
-            last_term = any_term
+            last_done = done_flag
 
-            if any_term or any_trunc:
+            if done_flag:
                 ep_idx += 1
                 if ep_idx % 5 == 0:
                     learning_curve.append({"step": float(steps), "episode_return": float(ep_ret)})
@@ -189,15 +211,19 @@ def train_mappo(
         with torch.no_grad():
             next_v = float(critic(torch.as_tensor(g_state, device=dev, dtype=torch.float32).unsqueeze(0)).item())
 
+        vals_arr = np.asarray(b_vals, dtype=np.float32)
         adv_arr, ret_arr = compute_gae(
             np.asarray(b_rews, dtype=np.float32),
-            np.asarray(b_vals, dtype=np.float32),
+            vals_arr,
             np.asarray(b_terms, dtype=np.float32),
             next_v,
-            last_term,
+            last_done,
             gamma=cfg.gamma,
             gae_lambda=cfg.gae_lambda,
+            dones=np.asarray(b_dones, dtype=np.float32),
+            next_done=last_done,
         )
+        ev_hist.append(float(1.0 - np.var(ret_arr - vals_arr) / max(np.var(ret_arr), 1e-8)))
 
         t_loc = torch.as_tensor(np.asarray(b_local, dtype=np.float32), device=dev)
         t_gs = torch.as_tensor(np.asarray(b_states, dtype=np.float32), device=dev)
@@ -221,8 +247,9 @@ def train_mappo(
                     new_lp = dist_n.log_prob(t_act[mb].view(-1)).view(len(mb), env.num_agents)
                     entropy = dist_n.entropy().mean()
                 else:
-                    std = torch.exp(actor_logstd.clamp(-5.0, 2.0)).expand_as(out)  # type: ignore[union-attr]
-                    dist_n = Normal(out, std)
+                    mean_c = act_bias + act_scale * out
+                    std = act_scale * torch.exp(actor_logstd.clamp(-5.0, 2.0)).expand_as(mean_c)  # type: ignore[union-attr]
+                    dist_n = Normal(mean_c, std)
                     new_lp = dist_n.log_prob(t_act[mb].view(-1, env.action_dim)).sum(-1).view(len(mb), env.num_agents)
                     entropy = dist_n.entropy().sum(-1).mean()
 
@@ -247,7 +274,7 @@ def train_mappo(
             if env.is_discrete:
                 acts = out.argmax(dim=1).cpu().numpy()
                 return {a: int(acts[i]) for i, a in enumerate(env.agents)}
-            acts = out.cpu().numpy()
+            acts = (act_bias + act_scale * out).cpu().numpy()
             if env.action_low is not None and env.action_high is not None:
                 acts = np.clip(acts, env.action_low, env.action_high)
             return {a: acts[i] for i, a in enumerate(env.agents)}
@@ -263,6 +290,16 @@ def train_mappo(
         model={"actor": actor, "critic": critic},
         config=asdict(cfg),
         learning_curve=learning_curve,
-        train_diagnostics={"mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0},
+        train_diagnostics={
+            "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
+            "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
+            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            **(
+                {"final_logstd_mean": float(actor_logstd.detach().mean().item())}
+                if actor_logstd is not None
+                else {}
+            ),
+        },
         eval_stats=eval_stats,
     )

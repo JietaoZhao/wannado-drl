@@ -20,8 +20,8 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 
 from wannado.drl.core.networks import DeterministicActor, build_mlp
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
@@ -237,6 +237,9 @@ def train_maddpg(
         model={"actors": actors, "critics": critics},
         config=asdict(cfg),
         learning_curve=learning_curve,
-        train_diagnostics={"mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0},
+        train_diagnostics={
+            "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
+        },
         eval_stats=eval_stats,
     )

@@ -229,14 +229,14 @@ def train_iql_offline(
     if dataset.is_discrete:
         model_obj: Any = {"actor": actor_logits, "q": q_net, "v": v_net}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> int:
+        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor_logits), torch.no_grad():
                 return int(torch.argmax(actor_logits(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0))).item())
     else:
         model_obj = {"actor": actor_mean, "q": q_net_twin, "v": v_net}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> np.ndarray:
+        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor_mean), torch.no_grad():
                 m = torch.tanh(actor_mean(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)))

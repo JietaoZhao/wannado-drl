@@ -256,6 +256,7 @@ def train_hil_serl(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
             "human_interventions": intervention_count,
             "demo_buffer_size": replay.demo_buffer.size,
             "online_buffer_size": replay.online_buffer.size,

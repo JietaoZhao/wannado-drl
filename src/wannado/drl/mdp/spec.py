@@ -143,11 +143,11 @@ class MDPSpec:
             f"- **Domain & Objective**: `{self.domain}` — {self.goal_plain}",
             f"- **Control Step**: {self.decision_interval_plain}",
             f"- **State Space $\\mathcal{{S}}$**: {s_desc} | `partial_observability={self.partial_observability}`",
-            f"- **Action Space $\\mathcal{{A}}$**: `kind={self.action_spec.kind}`, `dim={self.action_spec.dim}`, "
-            f"`bounds={self.action_spec.bounds}`, `action_mask={self.action_spec.has_invalid_actions}`",
+            (f"- **Action Space $\\mathcal{{A}}$**: `kind={self.action_spec.kind}`, `dim={self.action_spec.dim}`, "
+            f"`bounds={self.action_spec.bounds}`, `action_mask={self.action_spec.has_invalid_actions}`"),
             f"- **Reward Function $R(s, a, s')$**: `{r_desc}`",
-            f"- **Discount & Horizon**: $\\gamma = {self.gamma}$, `truncated_horizon={self.termination_spec.truncated_horizon}`, "
-            f"`terminated={self.termination_spec.terminated_conditions}`, `bootstrap_on_truncated={self.termination_spec.bootstrap_on_truncated}`",
+            (f"- **Discount & Horizon**: $\\gamma = {self.gamma}$, `truncated_horizon={self.termination_spec.truncated_horizon}`, "
+            f"`terminated={self.termination_spec.terminated_conditions}`, `bootstrap_on_truncated={self.termination_spec.bootstrap_on_truncated}`"),
             f"- **Audited Task KPIs**: {', '.join(self.task_kpis) if self.task_kpis else 'none declared'}",
         ]
         if self.reward_hacking_risks:

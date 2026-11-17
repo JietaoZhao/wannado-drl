@@ -19,7 +19,6 @@ from __future__ import annotations
 import copy
 import time
 from dataclasses import asdict, dataclass
-from typing import Any
 
 import numpy as np
 import torch
@@ -188,6 +187,7 @@ def train_gspo(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_seq_ratio": float(np.mean(seq_ratio_hist)) if seq_ratio_hist else 1.0,
         },
         eval_stats=eval_stats,

@@ -19,6 +19,9 @@ from wannado.drl import (
     query_catalog,
     resolve_run_optimizations,
 )
+from wannado.drl import (
+    __version__ as drl_version,
+)
 from wannado.drl.catalog.build_catalog import REGISTRY_PATH, discover_algo_metas
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -48,7 +51,7 @@ class TestPackagingAndCatalogContracts(unittest.TestCase):
         )
         parts = proc.stdout.strip().split()
         self.assertEqual(len(parts), 2)
-        self.assertEqual(parts[0], "1.0.2")
+        self.assertEqual(parts[0], drl_version)
         self.assertTrue(len(parts[1]) > 0)
 
     def test_agent_kit_coexists_with_wannado_adv_without_prompt_collisions(self) -> None:

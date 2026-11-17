@@ -159,7 +159,7 @@ def train_cql(
 
         model_obj: Any = q_net
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> int:
+        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(q_net), torch.no_grad():
                 return int(torch.argmax(q_net(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0))).item())
@@ -225,7 +225,7 @@ def train_cql(
 
         model_obj = {"actor": actor, "critic": critic}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> np.ndarray:
+        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor), torch.no_grad():
                 a_t, _ = actor.get_action(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0), deterministic=True)
@@ -248,6 +248,7 @@ def train_cql(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
             "mean_cql_ood_gap": float(np.mean(cql_gap_hist)) if cql_gap_hist else 0.0,
         },
         eval_stats=eval_stats,

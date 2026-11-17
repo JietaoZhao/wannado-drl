@@ -11,6 +11,7 @@ Automatically detects common DRL publication & engineering traps:
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
@@ -133,13 +134,12 @@ def audit_drl_rigor(
     checks["beats_random_baseline"] = beat_random
 
     beat_heuristic = True
-    if heur_base is not None and eval_returns:
-        if stats["iqm"] < heur_base.mean_return:
-            beat_heuristic = False
-            red_flags.append("below_heuristic_baseline")
-            recommendations.append(
-                f"IQM ({stats['iqm']:.2f}) trails Heuristic ({heur_base.mean_return:.2f}); tune hyperparameters or use heuristic for demos (`hil_serl`)."
-            )
+    if heur_base is not None and eval_returns and stats["iqm"] < heur_base.mean_return:
+        beat_heuristic = False
+        red_flags.append("below_heuristic_baseline")
+        recommendations.append(
+            f"IQM ({stats['iqm']:.2f}) trails Heuristic ({heur_base.mean_return:.2f}); tune hyperparameters or use heuristic for demos (`hil_serl`)."
+        )
     checks["beats_heuristic_baseline"] = beat_heuristic
 
     # 3. Observation normalization evaluation-freeze guard
@@ -203,17 +203,35 @@ def audit_drl_rigor(
     train_eval_ok = True
     for r in seed_results:
         diag = r.train_diagnostics
-        if "final_entropy" in diag and float(diag["final_entropy"]) < 1e-4:
+        is_cont = (
+            float(diag.get("is_continuous", 0.0)) >= 0.5
+            or r.algo_id in {"sac", "td3", "ddpg", "hil_serl"}
+            or (mdp_spec is not None and mdp_spec.action_spec.kind == "continuous")
+        )
+        logstd_val = diag.get("final_logstd_mean")
+        ent_val = diag.get("final_entropy", diag.get("mean_entropy"))
+        ent_collapsed = False
+        if logstd_val is not None and (not math.isfinite(float(logstd_val)) or float(logstd_val) < -4.5):
+            ent_collapsed = True
+        elif ent_val is not None:
+            ent_f = float(ent_val)
+            if not math.isfinite(ent_f) or (not is_cont and ent_f < 1e-4) or (is_cont and ent_f < -8.0):
+                ent_collapsed = True
+        if ent_collapsed:
             policy_health_ok = False
             if "policy_entropy_collapse" not in red_flags:
                 red_flags.append("policy_entropy_collapse")
                 recommendations.append("Policy entropy collapsed near 0; increase `ent_coef` or `clip_high` (DAPO style).")
-        if "mean_explained_variance" in diag and float(diag["mean_explained_variance"]) < -0.5:
+
+        ev_val = diag.get("mean_explained_variance")
+        if ev_val is not None and (not math.isfinite(float(ev_val)) or float(ev_val) < -0.5):
             policy_health_ok = False
             if "critic_negative_explained_variance" not in red_flags:
                 red_flags.append("critic_negative_explained_variance")
                 recommendations.append("Critic explained variance < -0.5; check `terminated` vs `truncated` handling or reward scale.")
-        if "max_q_value" in diag and float(diag["max_q_value"]) > 1e4:
+
+        q_val = diag.get("max_q_value", diag.get("mean_q_value"))
+        if q_val is not None and (not math.isfinite(float(q_val)) or abs(float(q_val)) > 1e4):
             policy_health_ok = False
             if "q_value_explosion" not in red_flags:
                 red_flags.append("q_value_explosion")

@@ -217,7 +217,10 @@ def train_td3(
         model={"actor": actor, "critic": critic},
         config=asdict(cfg),
         learning_curve=learning_curve,
-        train_diagnostics={"mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0},
+        train_diagnostics={
+            "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
+        },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
         obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,

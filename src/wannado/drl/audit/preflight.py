@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import Callable
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 import numpy as np
@@ -152,14 +152,14 @@ def preflight_env(
             }
 
         t0 = time.perf_counter()
-        obs_d, _, _ = adapter.reset(seed=seed)
+        _obs_d, _, _ = adapter.reset(seed=seed)
         rew_vals: list[float] = []
         ep_rets: list[float] = []
         ep_lens: list[int] = []
         cur_ret, cur_len = 0.0, 0
         for _ in range(probe_steps):
-            obs_d, rews, terms, truncs, _, _ = adapter.step(_sample_marl_actions())
-            step_r = float(np.mean(list(rews.values())))
+            _obs_d, rew_dict, terms, truncs, _, _ = adapter.step(_sample_marl_actions())
+            step_r = float(np.mean(list(rew_dict.values())))
             rew_vals.append(step_r)
             cur_ret += step_r
             cur_len += 1
@@ -167,7 +167,7 @@ def preflight_env(
                 ep_rets.append(cur_ret)
                 ep_lens.append(cur_len)
                 cur_ret, cur_len = 0.0, 0
-                obs_d, _, _ = adapter.reset(seed=int(rng.integers(0, 100_000)))
+                _obs_d, _, _ = adapter.reset(seed=int(rng.integers(0, 100_000)))
         dt_ms = ((time.perf_counter() - t0) * 1000.0) / max(1, probe_steps)
 
         # Ensure full random baseline episodes across MARL tasks
@@ -175,8 +175,8 @@ def preflight_env(
             adapter.reset(seed=seed + 500 + ep_i)
             r_sum, l_sum = 0.0, 0
             for _ in range(500):
-                _, rews, terms, truncs, _, _ = adapter.step(_sample_marl_actions())
-                r_sum += float(np.mean(list(rews.values())))
+                _, rew_dict, terms, truncs, _, _ = adapter.step(_sample_marl_actions())
+                r_sum += float(np.mean(list(rew_dict.values())))
                 l_sum += 1
                 if any(terms.values()) or any(truncs.values()):
                     break
@@ -211,7 +211,7 @@ def preflight_env(
     act_kind = "discrete" if env.is_discrete else "continuous"
 
     # 1. Seeded reset reproducibility check
-    obs_a, info_a = env.reset(seed=seed)
+    obs_a, _info_a = env.reset(seed=seed)
     obs_b, _ = env.reset(seed=seed)
     if not np.all(np.isfinite(obs_a)):
         errors.append("Initial observation from reset() contains NaN or Inf.")
@@ -248,8 +248,10 @@ def preflight_env(
             else:
                 act = int(rng.integers(0, env.action_dim))
         else:
-            low = np.where(np.isfinite(env.action_low), env.action_low, -1.0)
-            high = np.where(np.isfinite(env.action_high), env.action_high, 1.0)
+            low_raw = env.action_low if env.action_low is not None else np.full(env.action_dim, -1.0, dtype=np.float32)
+            high_raw = env.action_high if env.action_high is not None else np.full(env.action_dim, 1.0, dtype=np.float32)
+            low = np.where(np.isfinite(low_raw), low_raw, -1.0)
+            high = np.where(np.isfinite(high_raw), high_raw, 1.0)
             act = rng.uniform(low, high).astype(np.float32)
 
         obs, rew, term, trunc, info = env.step(act)
@@ -300,7 +302,9 @@ def preflight_env(
         )
 
     # 3. Baseline sanity floors
-    rand_stats = evaluate_random_baseline(env, num_episodes=baseline_episodes, seed=seed + 500) if not errors else None
+    rand_stats_single: EpisodeEvalStats | None = (
+        evaluate_random_baseline(env, num_episodes=baseline_episodes, seed=seed + 500) if not errors else None
+    )
     heur_stats = (
         evaluate_heuristic_baseline(env, heuristic_fn=heuristic_fn, num_episodes=baseline_episodes, seed=seed + 500)
         if not errors
@@ -319,12 +323,14 @@ def preflight_env(
         warnings=warnings,
         errors=errors,
         recommendations=recommendations,
-        random_baseline=rand_stats,
+        random_baseline=rand_stats_single,
         heuristic_baseline=heur_stats,
         summary={
             "obs_abs_max": obs_abs_max,
             "max_abs_reward": max_abs_r,
-            "mean_episode_length": float(rand_stats.mean_length) if rand_stats is not None else (float(np.mean(ep_lengths)) if ep_lengths else None),
+            "mean_episode_length": float(rand_stats_single.mean_length)
+            if rand_stats_single is not None
+            else (float(np.mean(ep_lengths)) if ep_lengths else None),
             "saw_action_mask": saw_mask,
             "saw_reward_terms": saw_reward_terms,
             "saw_task_metrics": saw_task_metrics,

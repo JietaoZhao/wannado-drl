@@ -112,7 +112,12 @@ def train_ppo_gru(
     env = ensure_gym_env(env_or_factory)
 
     net = RecurrentActorCriticGRU(
-        env.obs_dim, env.action_dim, hidden_dim=cfg.hidden_dim, is_discrete=env.is_discrete
+        env.obs_dim,
+        env.action_dim,
+        hidden_dim=cfg.hidden_dim,
+        is_discrete=env.is_discrete,
+        action_low=env.action_low,
+        action_high=env.action_high,
     ).to(dev)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
     obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
@@ -152,11 +157,19 @@ def train_ppo_gru(
             ep_ret += float(reward)
             steps += 1
             done_flag = bool(term or trunc)
+            step_reward = float(reward)
+            if trunc and not term:
+                trunc_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
+                with torch.no_grad():
+                    _, _, _, trunc_nv_t, _ = net.step_action_value(
+                        torch.as_tensor(trunc_proc, device=dev, dtype=torch.float32).unsqueeze(0), h_cur
+                    )
+                    step_reward += cfg.gamma * float(trunc_nv_t.item())
 
             seq_obs.append(obs_proc)
             seq_act.append(act_env)
             seq_lp.append(float(lp_t.item()))
-            seq_rew.append(float(reward))
+            seq_rew.append(step_reward)
             seq_term.append(float(term))
             seq_done.append(float(done_flag))
             seq_val.append(float(val_t.item()))
@@ -186,8 +199,17 @@ def train_ppo_gru(
         rews_arr = np.asarray(seq_rew, dtype=np.float32)
         vals_arr = np.asarray(seq_val, dtype=np.float32)
         terms_arr = np.asarray(seq_term, dtype=np.float32)
+        dones_arr = np.asarray(seq_done, dtype=np.float32)
         adv_arr, ret_arr = compute_gae(
-            rews_arr, vals_arr, terms_arr, next_v, bool(seq_term[-1]), gamma=cfg.gamma, gae_lambda=cfg.gae_lambda
+            rews_arr,
+            vals_arr,
+            terms_arr,
+            next_v,
+            bool(seq_term[-1]),
+            gamma=cfg.gamma,
+            gae_lambda=cfg.gae_lambda,
+            dones=dones_arr,
+            next_done=bool(seq_done[-1]),
         )
 
         b_obs = torch.as_tensor(np.asarray(seq_obs, dtype=np.float32), device=dev).unsqueeze(1)
@@ -212,8 +234,8 @@ def train_ppo_gru(
                 new_lp = dist.log_prob(b_act)
                 entropy = dist.entropy()
             else:
-                mean = net.actor(feats)
-                std = torch.exp(net.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
+                mean = net.action_bias + net.action_scale * net.actor(feats)
+                std = net.action_scale * torch.exp(net.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
                 dist = Normal(mean, std)
                 new_lp = dist.log_prob(b_act).sum(-1)
                 entropy = dist.entropy().sum(-1)
@@ -267,7 +289,14 @@ def train_ppo_gru(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
+            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            **(
+                {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
+                if not env.is_discrete
+                else {}
+            ),
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

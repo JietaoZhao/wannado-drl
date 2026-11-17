@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -117,7 +117,7 @@ def _flatten_obs(obs: Any, obs_space: Any = None) -> np.ndarray:
     if isinstance(obs_space, spaces.Space):
         try:
             return np.asarray(spaces.flatten(obs_space, obs), dtype=np.float32).reshape(-1)
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 — fall back to ndarray conversion for arbitrary gym spaces
             pass
 
     arr = np.asarray(obs, dtype=np.float32)
@@ -142,7 +142,7 @@ def _infer_flat_obs_dim(obs_space: Any, sample_obs: Any | None = None) -> int:
             return int(obs_space.n)
         try:
             return int(spaces.flatdim(obs_space))
-        except Exception:  # noqa: BLE001
+        except Exception:  # noqa: BLE001, S110 — inspect sample_obs shape when flatdim fails
             pass
     if sample_obs is not None:
         return int(_flatten_obs(sample_obs, obs_space).shape[0])
@@ -204,7 +204,7 @@ class UniversalGymAdapter(gym.Env):
         # Normalize legacy gym spaces or Gymnasium spaces
         self.action_space = self._coerce_action_space(raw_act_space)
         self.is_discrete = isinstance(self.action_space, spaces.Discrete)
-        if self.is_discrete:
+        if isinstance(self.action_space, spaces.Discrete):
             self.action_dim = int(self.action_space.n)
             self.action_low = None
             self.action_high = None
@@ -328,9 +328,12 @@ class UniversalGymAdapter(gym.Env):
         else:
             raise ValueError(f"Unsupported env.step() return format: {type(out)}")
 
-        if self._max_episode_steps is not None and self._step_counter >= self._max_episode_steps:
-            if not terminated:
-                truncated = True
+        if (
+            self._max_episode_steps is not None
+            and self._step_counter >= self._max_episode_steps
+            and not terminated
+        ):
+            truncated = True
 
         obs_vec = _flatten_obs(raw_obs, self._raw_obs_space)
         if self.is_discrete:

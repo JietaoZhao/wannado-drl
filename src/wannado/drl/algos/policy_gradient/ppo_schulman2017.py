@@ -117,12 +117,19 @@ def train_ppo(
     env = ensure_gym_env(env_or_factory)
 
     net: DiscreteActorCritic | ContinuousActorCritic
+    act_dtype: np.dtype[Any]
     if env.is_discrete:
         net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
         act_shape: tuple[int, ...] = ()
         act_dtype = np.dtype(np.int64)
     else:
-        net = ContinuousActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
+        net = ContinuousActorCritic(
+            env.obs_dim,
+            env.action_dim,
+            hidden_dims=cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
+        ).to(dev)
         act_shape = (env.action_dim,)
         act_dtype = np.dtype(np.float32)
 
@@ -149,7 +156,7 @@ def train_ppo(
             optimizer.param_groups[0]["lr"] = max(1e-6, cfg.lr * frac)
 
         buffer.reset()
-        last_term = False
+        last_done = False
         for _ in range(cfg.n_steps):
             if steps >= cfg.total_timesteps:
                 break
@@ -175,17 +182,28 @@ def train_ppo(
             next_obs, reward, term, trunc, next_info = env.step(act_env)
             ep_ret += float(reward)
             steps += 1
+            step_reward = float(reward)
+            done_flag = bool(term or trunc)
+            if trunc and not term:
+                trunc_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
+                with torch.no_grad():
+                    trunc_v = float(
+                        net.get_value(torch.as_tensor(trunc_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item()
+                    )
+                step_reward += cfg.gamma * trunc_v
+
             buffer.add(
                 obs_proc,
                 act_env,
                 float(lp_t.item()),
-                float(reward),
+                step_reward,
                 bool(term),
                 float(val_t.item()),
                 action_mask=mask if mask is not None else (np.ones(env.action_dim, dtype=np.bool_) if env.is_discrete else None),
+                done=done_flag,
             )
-            last_term = bool(term)
-            if term or trunc:
+            last_done = done_flag
+            if done_flag:
                 ep_idx += 1
                 if ep_idx % 5 == 0:
                     learning_curve.append({"step": float(steps), "episode_return": float(ep_ret)})
@@ -200,7 +218,7 @@ def train_ppo(
         next_proc = obs_rms.normalize(obs) if obs_rms is not None else obs
         with torch.no_grad():
             next_v = float(net.get_value(torch.as_tensor(next_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item())
-        buffer.compute_returns_and_advantage(next_v, last_term, gamma=cfg.gamma, gae_lambda=cfg.gae_lambda)
+        buffer.compute_returns_and_advantage(next_v, last_done, gamma=cfg.gamma, gae_lambda=cfg.gae_lambda)
 
         b_obs = torch.as_tensor(buffer.obs[:n], device=dev)
         b_act = torch.as_tensor(buffer.actions[:n], device=dev)
@@ -282,6 +300,12 @@ def train_ppo(
             "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_approx_kl": float(np.mean(kl_hist)) if kl_hist else 0.0,
             "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
+            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            **(
+                {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
+                if isinstance(net, ContinuousActorCritic)
+                else {}
+            ),
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

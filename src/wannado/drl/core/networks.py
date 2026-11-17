@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import math
-from typing import Sequence
+from collections.abc import Sequence
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.distributions import Categorical, Normal
 
 
@@ -77,21 +77,52 @@ class DiscreteActorCritic(nn.Module):
         return action, dist.log_prob(action), dist.entropy(), self.get_value(obs)
 
 
-class ContinuousActorCritic(nn.Module):
-    """Gaussian Actor-Critic for continuous Box action spaces."""
+def _compute_affine_action_bounds(
+    action_dim: int,
+    action_low: np.ndarray | None,
+    action_high: np.ndarray | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return ``(scale, bias)`` tensors centering/scaling finite Box action bounds."""
+    scale = np.ones((action_dim,), dtype=np.float32)
+    bias = np.zeros((action_dim,), dtype=np.float32)
+    if action_low is not None and action_high is not None:
+        lo = np.asarray(action_low, dtype=np.float32).reshape(-1)
+        hi = np.asarray(action_high, dtype=np.float32).reshape(-1)
+        if lo.shape == (action_dim,) and hi.shape == (action_dim,):
+            finite = np.isfinite(lo) & np.isfinite(hi) & (hi > lo)
+            scale = np.where(finite, 0.5 * (hi - lo), 1.0).astype(np.float32)
+            bias = np.where(finite, 0.5 * (hi + lo), 0.0).astype(np.float32)
+    return torch.as_tensor(scale, dtype=torch.float32), torch.as_tensor(bias, dtype=torch.float32)
 
-    def __init__(self, obs_dim: int, action_dim: int, hidden_dims: Sequence[int] = (64, 64)) -> None:
+
+class ContinuousActorCritic(nn.Module):
+    """Gaussian Actor-Critic for continuous Box action spaces (with optional bound-aware scaling)."""
+
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_dim: int,
+        hidden_dims: Sequence[int] = (64, 64),
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
+    ) -> None:
         super().__init__()
         self.critic = build_mlp(obs_dim, hidden_dims, 1, activation=nn.Tanh, orthogonal_init=True, last_std=1.0)
         self.actor_mean = build_mlp(obs_dim, hidden_dims, action_dim, activation=nn.Tanh, orthogonal_init=True, last_std=0.01)
         self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
+        self.register_buffer("action_scale", scale_t)
+        self.register_buffer("action_bias", bias_t)
 
     def get_value(self, obs: torch.Tensor) -> torch.Tensor:
         return self.critic(obs).squeeze(-1)
 
     def get_dist(self, obs: torch.Tensor) -> Normal:
-        mean = self.actor_mean(obs)
-        std = torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
+        mean = self.action_bias + self.action_scale * self.actor_mean(obs)
+        std = self.action_scale * torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
         return Normal(mean, std)
 
     def get_action_and_value(
@@ -111,12 +142,17 @@ class ContinuousActorCritic(nn.Module):
 class RecurrentActorCriticGRU(nn.Module):
     """GRU-backed Actor-Critic for POMDP / partially observable tasks."""
 
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
+
     def __init__(
         self,
         obs_dim: int,
         action_dim: int,
         hidden_dim: int = 64,
         is_discrete: bool = True,
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.is_discrete = is_discrete
@@ -127,6 +163,9 @@ class RecurrentActorCriticGRU(nn.Module):
         self.actor = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
         if not is_discrete:
             self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
+        scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
+        self.register_buffer("action_scale", scale_t)
+        self.register_buffer("action_bias", bias_t)
 
     def forward_seq(
         self,
@@ -150,6 +189,20 @@ class RecurrentActorCriticGRU(nn.Module):
             outputs.append(step_out)
         return torch.cat(outputs, dim=0), h
 
+    def get_dist_from_features(
+        self,
+        feats: torch.Tensor,
+        action_mask: torch.Tensor | None = None,
+    ) -> Categorical | Normal:
+        if self.is_discrete:
+            logits = self.actor(feats)
+            if action_mask is not None:
+                logits = logits.masked_fill(~action_mask.bool(), -1e8)
+            return Categorical(logits=logits)
+        mean = self.action_bias + self.action_scale * self.actor(feats)
+        std = self.action_scale * torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
+        return Normal(mean, std)
+
     def step_action_value(
         self,
         obs: torch.Tensor,
@@ -165,16 +218,16 @@ class RecurrentActorCriticGRU(nn.Module):
             logits = self.actor(feat)
             if action_mask is not None:
                 logits = logits.masked_fill(~action_mask.bool(), -1e8)
-            dist = Categorical(logits=logits)
+            disc_dist = Categorical(logits=logits)
             if action is None:
-                action = logits.argmax(dim=-1) if deterministic else dist.sample()
-            return action, dist.log_prob(action), dist.entropy(), val, h_next
-        mean = self.actor(feat)
-        std = torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
-        dist = Normal(mean, std)
+                action = logits.argmax(dim=-1) if deterministic else disc_dist.sample()
+            return action, disc_dist.log_prob(action), disc_dist.entropy(), val, h_next
+        mean = self.action_bias + self.action_scale * self.actor(feat)
+        std = self.action_scale * torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
+        cont_dist = Normal(mean, std)
         if action is None:
-            action = mean if deterministic else dist.sample()
-        return action, dist.log_prob(action).sum(-1), dist.entropy().sum(-1), val, h_next
+            action = mean if deterministic else cont_dist.sample()
+        return action, cont_dist.log_prob(action).sum(-1), cont_dist.entropy().sum(-1), val, h_next
 
 
 class QNetwork(nn.Module):
@@ -205,6 +258,8 @@ class DuelingQNetwork(nn.Module):
 class CategoricalQNetwork(nn.Module):
     """C51 Distributional Q-Network outputting logits over n_atoms per action."""
 
+    atoms: torch.Tensor
+
     def __init__(
         self,
         obs_dim: int,
@@ -232,6 +287,9 @@ class CategoricalQNetwork(nn.Module):
 class DeterministicActor(nn.Module):
     """Bounded continuous deterministic actor mu(s) for DDPG / TD3 / MADDPG."""
 
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
+
     def __init__(
         self,
         obs_dim: int,
@@ -256,6 +314,8 @@ class SquashedGaussianActor(nn.Module):
 
     LOG_STD_MAX = 2.0
     LOG_STD_MIN = -5.0
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
 
     def __init__(
         self,

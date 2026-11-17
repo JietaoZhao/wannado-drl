@@ -16,15 +16,17 @@ class RolloutBuffer:
         num_steps: int,
         obs_dim: int,
         action_shape: tuple[int, ...],
-        action_dtype: np.dtype[Any] = np.dtype(np.float32),
+        action_dtype: np.dtype[Any] | None = None,
         mask_dim: int | None = None,
     ) -> None:
         self.num_steps = int(num_steps)
+        resolved_action_dtype = np.dtype(np.float32) if action_dtype is None else np.dtype(action_dtype)
         self.obs = np.zeros((num_steps, obs_dim), dtype=np.float32)
-        self.actions = np.zeros((num_steps, *action_shape), dtype=action_dtype)
+        self.actions = np.zeros((num_steps, *action_shape), dtype=resolved_action_dtype)
         self.logprobs = np.zeros((num_steps,), dtype=np.float32)
         self.rewards = np.zeros((num_steps,), dtype=np.float32)
         self.terminateds = np.zeros((num_steps,), dtype=np.float32)
+        self.dones = np.zeros((num_steps,), dtype=np.float32)
         self.values = np.zeros((num_steps,), dtype=np.float32)
         self.advantages = np.zeros((num_steps,), dtype=np.float32)
         self.returns = np.zeros((num_steps,), dtype=np.float32)
@@ -42,6 +44,7 @@ class RolloutBuffer:
         terminated: bool,
         value: float,
         action_mask: np.ndarray | None = None,
+        done: bool | None = None,
     ) -> None:
         idx = self.ptr
         if idx >= self.num_steps:
@@ -51,6 +54,7 @@ class RolloutBuffer:
         self.logprobs[idx] = logprob
         self.rewards[idx] = reward
         self.terminateds[idx] = float(terminated)
+        self.dones[idx] = float(terminated if done is None else done)
         self.values[idx] = value
         if self.action_masks is not None and action_mask is not None:
             self.action_masks[idx] = action_mask.astype(np.bool_)
@@ -63,15 +67,21 @@ class RolloutBuffer:
         gamma: float = 0.99,
         gae_lambda: float = 0.95,
     ) -> None:
-        """Compute GAE while preserving bootstrap across truncated (time-limit) boundaries."""
+        """Compute GAE while preventing cross-episode leakage across terminated/truncated boundaries.
+
+        Callers handling TimeLimit truncations (``trunc and not term``) should pre-bootstrap
+        ``reward += gamma * V(terminal_next_obs)`` and pass ``done=True`` so GAE recursion
+        terminates cleanly at the episode boundary without double-counting or leaking next-episode values.
+        """
         last_gae = 0.0
         n = self.ptr
         for t in reversed(range(n)):
             if t == n - 1:
                 next_val = next_value
+                nonterminal = 1.0 - float(bool(self.dones[t]) or bool(next_terminated))
             else:
                 next_val = float(self.values[t + 1])
-            nonterminal = 1.0 - float(self.terminateds[t])
+                nonterminal = 1.0 - float(self.dones[t])
             delta = float(self.rewards[t]) + gamma * next_val * nonterminal - float(self.values[t])
             last_gae = delta + gamma * gae_lambda * nonterminal * last_gae
             self.advantages[t] = last_gae
@@ -79,6 +89,7 @@ class RolloutBuffer:
 
     def reset(self) -> None:
         self.ptr = 0
+        self.dones.fill(0.0)
 
 
 class ReplayBuffer:
@@ -206,7 +217,7 @@ class DualDemoReplayBuffer:
         if self.online_buffer.size == 0:
             return self.demo_buffer.sample(batch_size, rng=rng)
 
-        n_demo = max(1, min(batch_size - 1, int(round(batch_size * demo_fraction))))
+        n_demo = max(1, min(batch_size - 1, round(batch_size * demo_fraction)))
         n_online = batch_size - n_demo
         d_batch = self.demo_buffer.sample(n_demo, rng=rng)
         o_batch = self.online_buffer.sample(n_online, rng=rng)

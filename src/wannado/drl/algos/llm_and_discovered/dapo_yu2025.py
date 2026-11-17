@@ -131,7 +131,11 @@ def train_dapo(
     total_rollouts = 0
 
     for step in range(1, cfg.total_updates + 1):
-        kept_prompts, kept_resps, kept_old_lps, kept_advs, all_raw_rews = [], [], [], [], []
+        kept_prompts: list[Any] = []
+        kept_resps: list[Any] = []
+        kept_old_lps: list[Any] = []
+        kept_advs: list[Any] = []
+        all_raw_rews: list[float] = []
         attempts = 0
         while len(kept_prompts) < cfg.prompts_per_batch and attempts < cfg.max_resample_rounds:
             attempts += 1
@@ -219,6 +223,7 @@ def train_dapo(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_dynamic_kept_fraction": float(np.mean(kept_fraction_hist)) if kept_fraction_hist else 1.0,
         },
         eval_stats=eval_stats,

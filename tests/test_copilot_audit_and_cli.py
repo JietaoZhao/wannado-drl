@@ -27,8 +27,8 @@ from wannado.drl import (
     install_agent_kit,
     preflight_env,
     recommend_algo_suite,
-    scan_project,
     scaffold_lab,
+    scan_project,
 )
 from wannado.drl.cli import main as cli_main
 from wannado.drl.reporter import evaluate_drl_suite

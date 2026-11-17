@@ -88,12 +88,12 @@ def _extract_readme_summary(root: Path) -> tuple[str, str]:
         para_lines: list[str] = []
         for line in raw.splitlines():
             s = line.strip()
-            if not s or s.startswith("<") or s.startswith("![") or s.startswith("[!["):
+            if not s or s.startswith(("<", "![", "[![")):
                 continue
             if not title and s.startswith("#"):
                 title = s.lstrip("#").strip()
                 continue
-            if s.startswith("#") or s.startswith("---"):
+            if s.startswith(("#", "---")):
                 if para_lines:
                     break
                 continue
@@ -239,9 +239,13 @@ def scan_project(project_dir: str | Path = ".", max_files: int = 200) -> Project
                         frameworks.add("wannado-drl")
                     elif top in fw_map:
                         frameworks.add(fw_map[top])
-                elif not is_lab_path and isinstance(node, ast.ClassDef) and not node.name.startswith("_"):
-                    if len(detected_symbols) < 15:
-                        detected_symbols.append(f"class {node.name} ({rel})")
+                elif (
+                    not is_lab_path
+                    and isinstance(node, ast.ClassDef)
+                    and not node.name.startswith("_")
+                    and len(detected_symbols) < 15
+                ):
+                    detected_symbols.append(f"class {node.name} ({rel})")
             if not is_lab_path:
                 mod_doc = ast.get_docstring(tree)
                 if mod_doc and len(doc_snippets) < 4:

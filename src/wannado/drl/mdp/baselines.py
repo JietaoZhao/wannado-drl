@@ -108,7 +108,7 @@ def evaluate_sequence_task(
     for i in range(prompts.shape[0]):
         rew, metrics = task.score_sequence(prompts[i], responses[i])
         returns.append(float(rew))
-        lengths.append(int(len(responses[i])))
+        lengths.append(len(responses[i]))
         for k, v in metrics.items():
             kpi_sums[k] = kpi_sums.get(k, 0.0) + float(v)
             kpi_counts[k] = kpi_counts.get(k, 0) + 1
@@ -145,8 +145,10 @@ def evaluate_random_baseline(
                 if valid.size > 0:
                     return int(rng.choice(valid))
             return int(rng.integers(0, env.action_dim))
-        low = np.where(np.isfinite(env.action_low), env.action_low, -1.0)
-        high = np.where(np.isfinite(env.action_high), env.action_high, 1.0)
+        low_raw = env.action_low if env.action_low is not None else np.full(env.action_dim, -1.0, dtype=np.float32)
+        high_raw = env.action_high if env.action_high is not None else np.full(env.action_dim, 1.0, dtype=np.float32)
+        low = np.where(np.isfinite(low_raw), low_raw, -1.0)
+        high = np.where(np.isfinite(high_raw), high_raw, 1.0)
         return rng.uniform(low, high).astype(np.float32)
 
     return evaluate_policy_episodes(env, _random_policy, num_episodes=num_episodes, seed=seed)
@@ -210,43 +212,6 @@ def evaluate_marl_episodes(
         mean_length=float(np.mean(lengths)) if lengths else 0.0,
         terminated_fraction=float(term_count / max(num_episodes, 1)),
         truncated_fraction=float(trunc_count / max(num_episodes, 1)),
-    )
-
-
-def evaluate_sequence_task(
-    task: SequenceTaskEnv,
-    generate_fn: Callable[[np.ndarray], np.ndarray],
-    *,
-    num_prompts: int = 24,
-    seed: int = 10_000,
-) -> EpisodeEvalStats:
-    """Evaluate an autoregressive sequence policy deterministically on verifiable prompts."""
-    rng = np.random.default_rng(seed)
-    prompts = task.sample_prompts(num_prompts, rng)
-    responses = generate_fn(prompts)
-    returns: list[float] = []
-    lengths: list[int] = []
-    kpi_sums: dict[str, float] = {}
-    kpi_counts: dict[str, int] = {}
-
-    for i in range(prompts.shape[0]):
-        rew, metrics = task.score_sequence(prompts[i], responses[i])
-        returns.append(float(rew))
-        lengths.append(int(len(responses[i])))
-        for k, v in metrics.items():
-            kpi_sums[k] = kpi_sums.get(k, 0.0) + float(v)
-            kpi_counts[k] = kpi_counts.get(k, 0) + 1
-
-    arr = np.asarray(returns, dtype=np.float64)
-    return EpisodeEvalStats(
-        returns=returns,
-        lengths=lengths,
-        mean_return=float(np.mean(arr)) if len(arr) else 0.0,
-        std_return=float(np.std(arr, ddof=0)) if len(arr) else 0.0,
-        mean_length=float(np.mean(lengths)) if lengths else 0.0,
-        task_metrics_mean={k: kpi_sums[k] / max(kpi_counts[k], 1) for k in kpi_sums},
-        terminated_fraction=1.0,
-        truncated_fraction=0.0,
     )
 
 

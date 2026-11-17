@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
 
 from wannado.drl.agent_kit import install_agent_kit
 from wannado.drl.audit import preflight_env
@@ -269,11 +269,11 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     if args.command == "preflight":
         iface_path = Path(args.interface_path).resolve()
-        spec = importlib.util.spec_from_file_location("_wannado_user_iface", iface_path)
-        if spec is None or spec.loader is None:
+        mod_spec = importlib.util.spec_from_file_location("_wannado_user_iface", iface_path)
+        if mod_spec is None or mod_spec.loader is None:
             raise FileNotFoundError(f"Cannot load interface module at {iface_path}")
-        mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(mod)
+        mod = importlib.util.module_from_spec(mod_spec)
+        mod_spec.loader.exec_module(mod)
         iface = mod.load_env_interface()
         pf = preflight_env(iface.env_or_factory, heuristic_fn=iface.heuristic_fn)
         if args.as_json:

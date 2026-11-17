@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import unittest
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 import gymnasium as gym
 import numpy as np
@@ -66,7 +66,7 @@ class _DMEnvMock:
 
 
 class _ParallelMARLMock:
-    possible_agents = ["agent_0", "agent_1"]
+    possible_agents: ClassVar[list[str]] = ["agent_0", "agent_1"]
 
     def observation_space(self, agent: str) -> spaces.Space[Any]:
         return spaces.Box(-1.0, 1.0, shape=(2,), dtype=np.float32)
@@ -92,7 +92,7 @@ class TestAdaptersAndStage0MDP(unittest.TestCase):
         obs, _ = env.reset(seed=7)
         self.assertEqual(obs.shape, (3,))
         for idx in range(3):
-            obs, rew, term, trunc, _ = env.step(1)
+            obs, _rew, term, trunc, _ = env.step(1)
             if idx < 2:
                 self.assertFalse(term or trunc)
             else:
@@ -120,7 +120,7 @@ class TestAdaptersAndStage0MDP(unittest.TestCase):
         marl = MultiAgentEnvAdapter(_ParallelMARLMock())
         self.assertEqual(marl.num_agents, 2)
         self.assertEqual(marl.state_dim, 4)
-        obs_d, gs, _ = marl.reset(seed=0)
+        _obs_d, gs, _ = marl.reset(seed=0)
         self.assertEqual(gs.shape, (4,))
         _, rews, _, truncs, _, _ = marl.step({"agent_0": 1, "agent_1": 1})
         self.assertEqual(rews["agent_0"], 1.0)

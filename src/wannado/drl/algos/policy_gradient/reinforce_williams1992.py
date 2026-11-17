@@ -112,7 +112,13 @@ def train_reinforce(
     if env.is_discrete:
         net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
     else:
-        net = ContinuousActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
+        net = ContinuousActorCritic(
+            env.obs_dim,
+            env.action_dim,
+            hidden_dims=cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
+        ).to(dev)
 
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr)
     obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
@@ -128,6 +134,8 @@ def train_reinforce(
         ep_idx += 1
         ep_obs, ep_acts, ep_rews, ep_masks = [], [], [], []
         done = False
+        last_trunc = False
+        last_term = False
 
         while not done and steps < cfg.total_timesteps:
             if obs_rms is not None:
@@ -155,11 +163,17 @@ def train_reinforce(
                 ep_masks.append(mask if mask is not None else np.ones(env.action_dim, dtype=np.bool_))
             steps += 1
             obs = next_obs
+            last_term = bool(term)
+            last_trunc = bool(trunc)
             done = bool(term or trunc)
 
-        # Compute backward discounted returns G_t
+        # Compute backward discounted returns G_t (bootstrapping across TimeLimit truncation when baseline exists)
         returns = np.zeros(len(ep_rews), dtype=np.float32)
         g = 0.0
+        if cfg.use_baseline and (last_trunc or not last_term) and not last_term:
+            tail_proc = obs_rms.normalize(obs) if obs_rms is not None else obs
+            with torch.no_grad():
+                g = float(net.get_value(torch.as_tensor(tail_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item())
         for i in range(len(ep_rews) - 1, -1, -1):
             g = ep_rews[i] + cfg.gamma * g
             returns[i] = g
@@ -225,7 +239,16 @@ def train_reinforce(
         model=net,
         config=asdict(cfg),
         learning_curve=learning_curve,
-        train_diagnostics={"mean_entropy": float(np.mean(entropies)) if entropies else 0.0},
+        train_diagnostics={
+            "mean_entropy": float(np.mean(entropies)) if entropies else 0.0,
+            "final_entropy": float(entropies[-1]) if entropies else 0.0,
+            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            **(
+                {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
+                if isinstance(net, ContinuousActorCritic)
+                else {}
+            ),
+        },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
         obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,

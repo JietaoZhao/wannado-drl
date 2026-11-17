@@ -261,6 +261,7 @@ def train_arpo(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "adaptive_branches_triggered": branch_counts,
         },
         eval_stats=eval_stats,

@@ -219,8 +219,11 @@ def train_sac(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "final_alpha": float(log_alpha.exp().item()),
+            "is_continuous": 1.0,
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

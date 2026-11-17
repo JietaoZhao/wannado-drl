@@ -46,6 +46,7 @@ from wannado.drl.core.wrappers import (
 
 __all__ = [
     "ALGO_DEFAULT_OPTIMIZATIONS",
+    "OPTIMIZATION_PROVENANCE",
     "AlgoCitation",
     "AlgoMeta",
     "AutoregressiveSeqPolicy",
@@ -57,7 +58,6 @@ __all__ = [
     "DuelingQNetwork",
     "EpisodeEvalStats",
     "MultiAgentEnvAdapter",
-    "OPTIMIZATION_PROVENANCE",
     "OfflineTransitionDataset",
     "OptimizationProvenance",
     "QMixMixer",

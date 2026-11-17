@@ -18,13 +18,14 @@ Original single-file modular implementation for wannado-drl.
 from __future__ import annotations
 
 import time
+from collections.abc import Mapping
 from dataclasses import asdict, dataclass
 from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
 import torch.nn.functional as F
+from torch import nn
 from torch.distributions import Categorical, Normal
 from torch.func import functional_call
 
@@ -200,7 +201,7 @@ def train_discorl(
     ent_hist, meta_loss_hist = [], []
 
     def _compute_inner_loss(
-        params_dict: dict[str, torch.Tensor] | None,
+        params_dict: Mapping[str, torch.Tensor] | None,
         b_obs: torch.Tensor,
         b_next: torch.Tensor,
         b_act: torch.Tensor,
@@ -213,9 +214,10 @@ def train_discorl(
             with torch.no_grad():
                 _, y_next = agent(b_next)
         else:
-            pol_out, y_curr = functional_call(agent, params_dict, (b_obs,))
+            param_map = dict(params_dict)
+            pol_out, y_curr = functional_call(agent, param_map, (b_obs,))
             with torch.no_grad():
-                _, y_next = functional_call(agent, params_dict, (b_next,))
+                _, y_next = functional_call(agent, param_map, (b_next,))
 
         if env.is_discrete:
             logits = pol_out.masked_fill(~b_mask, -1e8) if b_mask is not None else pol_out
@@ -239,7 +241,14 @@ def train_discorl(
         pred_loss = F.mse_loss(y_curr, y_target.detach() if params_dict is None else y_target)
         return pg_loss + cfg.pred_coef * pred_loss - cfg.ent_coef * ent.mean(), ent.mean()
 
-    prev_batch: tuple[torch.Tensor, ...] | None = None
+    prev_batch: tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor | None,
+    ] | None = None
 
     while steps < cfg.total_timesteps:
         buf_obs, buf_next, buf_act, buf_rew, buf_nt, buf_mask = [], [], [], [], [], []
@@ -371,7 +380,9 @@ def train_discorl(
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_meta_loss": float(np.mean(meta_loss_hist)) if meta_loss_hist else 0.0,
+            "is_continuous": 0.0 if env.is_discrete else 1.0,
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

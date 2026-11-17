@@ -9,7 +9,7 @@ from typing import Any
 
 import numpy as np
 import torch
-import torch.nn as nn
+from torch import nn
 
 
 def set_global_seed(seed: int, deterministic_torch: bool = False) -> np.random.Generator:
@@ -130,20 +130,30 @@ def compute_gae(
     next_terminated: bool | np.ndarray,
     gamma: float = 0.99,
     gae_lambda: float = 0.95,
+    dones: np.ndarray | None = None,
+    next_done: bool | np.ndarray | None = None,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute Generalized Advantage Estimation (Schulman et al., ICLR 2016).
 
     CRITICAL MDP BOUNDARY RULE:
-    Bootstraps V(s_{t+1}) whenever ``terminated == False``, even if ``truncated == True``!
-    Only genuine terminal states (``terminated=True``) zero out future value.
+    When ``dones`` (``term or trunc``) is passed with TimeLimit-bootstrapped rewards
+    (``r + gamma * V(next_obs)`` on ``trunc and not term``), GAE cuts recursion cleanly at
+    every episode boundary without leaking next-episode returns backward across resets.
     """
     num_steps = rewards.shape[0]
     advantages = np.zeros_like(rewards, dtype=np.float32)
     last_gae = np.zeros_like(rewards[0], dtype=np.float32)
+    boundaries = terminateds if dones is None else dones
+    end_boundary = next_terminated if next_done is None else next_done
 
     for t in reversed(range(num_steps)):
-        nonterminal_t = 1.0 - np.asarray(terminateds[t], dtype=np.float32)
-        next_v_t = np.asarray(next_value, dtype=np.float32) if t == num_steps - 1 else values[t + 1]
+        b_t = np.asarray(boundaries[t], dtype=np.float32)
+        if t == num_steps - 1:
+            b_t = np.maximum(b_t, np.asarray(end_boundary, dtype=np.float32))
+            next_v_t = np.asarray(next_value, dtype=np.float32)
+        else:
+            next_v_t = values[t + 1]
+        nonterminal_t = 1.0 - b_t
         delta = rewards[t] + gamma * next_v_t * nonterminal_t - values[t]
         last_gae = delta + gamma * gae_lambda * nonterminal_t * last_gae
         advantages[t] = last_gae
@@ -162,7 +172,7 @@ def discretize_observation(
     """Convert either a discrete or continuous flat observation vector into a hashable tabular state key."""
     arr = np.asarray(obs, dtype=np.float32).reshape(-1)
     if is_discrete_obs:
-        return tuple(int(round(float(x))) for x in arr)
+        return tuple(round(float(x)) for x in arr)
     clipped = np.clip(arr, -clip_range, clip_range)
     edges = np.linspace(-clip_range, clip_range, bins + 1)[1:-1]
     return tuple(int(np.digitize(float(v), edges)) for v in clipped)
