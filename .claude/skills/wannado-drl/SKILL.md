@@ -31,7 +31,7 @@ When the user says they want to do reinforcement learning in their project, **NE
 2. **Share Your Understanding First — Never Cold-Ask**:
    - First tell the user clearly **how you understand their project** based on real files, classes, imports, and `README.md` clues you just observed (`project_summary_guess`, `evidence_clues`).
    - If `understanding_confidence == "low"` or key simulation pieces are still unclear, explicitly share what you saw (and what you could NOT see yet) and align with the user through natural dialogue until you genuinely understand what their project does.
-3. **Showcase the `wannado-drl` Arsenal ("武器库")**:
+3. **Showcase the `wannado-drl` Arsenal**:
    - Present the versioned built-in arsenal (`build_arsenal_showcase()` / `format_arsenal_overview()`): explicitly state what classic foundations (Monte Carlo, SARSA, Q-Learning, DQN, REINFORCE, DDPG), standard workhorses (Double/Dueling DQN, C51, A2C, TRPO, PPO, TD3, SAC, QMIX), and 2022–2025 frontier SOTA (PPO-GRU, CQL/IQL Offline RL, MAPPO/MADDPG, HIL-SERL *Science Robotics 2025*, GRPO, DAPO, GSPO, ARPO, DiscoRL *Nature 2025*) are ready as of this `wannado-drl` release.
 4. **Pop the Mandatory Two-Step Goal Confirmation Dialog (`goal_confirmation_dialog`)**:
    - Use your IDE's interactive multi-choice dialog widget (e.g. `ask_question`, or clear structured choices if no widget exists) **before** designing the MDP or selecting algorithms:

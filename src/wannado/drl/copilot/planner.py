@@ -19,13 +19,13 @@ from wannado.drl.core.utils import resolve_device
 from wannado.drl.mdp.spec import MDPSpec
 
 _FAMILY_LABELS: dict[str, str] = {
-    "tabular_classic": "Tabular Classic Foundations (表格型经典入门)",
-    "value_based": "Deep Value-Based Q-Learning (深度值函数 / DQN 系列)",
-    "policy_gradient": "On-Policy & Recurrent Policy Gradient (策略梯度 / PPO / POMDP)",
-    "actor_critic_off": "Continuous Off-Policy & Human-in-the-Loop (连续控制 / SAC / HIL-SERL)",
-    "offline_rl": "Offline / Batch RL (离线历史数据策略优化)",
-    "multi_agent": "Multi-Agent CTDE Coordination (多智能体协同 MARL)",
-    "llm_and_discovered": "2024-2025 Sequence Reasoning & Meta-Discovered RL (大模型推理 / 元学习规则发现)",
+    "tabular_classic": "Tabular Classic Foundations",
+    "value_based": "Deep Value-Based Q-Learning (DQN Family)",
+    "policy_gradient": "On-Policy & Recurrent Policy Gradient (PPO / POMDP)",
+    "actor_critic_off": "Continuous Off-Policy & Human-in-the-Loop (SAC / HIL-SERL)",
+    "offline_rl": "Offline / Batch RL",
+    "multi_agent": "Multi-Agent CTDE Coordination (MARL)",
+    "llm_and_discovered": "2024-2025 Sequence Reasoning & Meta-Discovered RL",
 }
 
 _CLASSIC_BASELINES = {"monte_carlo", "sarsa", "q_learning", "dqn", "reinforce", "ddpg", "vdn", "cql", "grpo"}
@@ -34,7 +34,7 @@ _FRONTIER_SOTA = {"ppo_gru", "hil_serl", "mappo", "maddpg", "dapo", "gspo", "arp
 
 def _get_package_version() -> str:
     pkg = sys.modules.get("wannado.drl")
-    return str(getattr(pkg, "__version__", "1.0.4"))
+    return str(getattr(pkg, "__version__", "1.0.5"))
 
 
 @dataclass
@@ -480,7 +480,7 @@ def explain_parameters(
 
     total_timesteps_and_seeds = _knob(
         parameter="episodes / total_timesteps & num_seeds",
-        terminology="Episode (回合/局), Timestep (决策步), Random Seed (随机种子)",
+        terminology="Episode, Timestep, Random Seed",
         plain_analogy=(
             "Think of 1 Episode as playing one complete match from start to finish, 1 Timestep as making one single move inside that match, "
             "and Random Seeds as repeating the whole training 3-5 times from scratch to prove good scores aren't a fluke."
@@ -511,7 +511,7 @@ def explain_parameters(
 
     gamma_guide = _knob(
         parameter="gamma",
-        terminology="Discount Factor (折扣因子 gamma)",
+        terminology="Discount Factor (gamma)",
         plain_analogy="How far ahead the agent cares—like choosing between instant pocket money today vs investing for next month.",
         equivalent_to="Effective planning horizon is roughly 1 / (1 - gamma) steps (e.g. gamma=0.99 ≈ 100 steps ahead).",
         if_higher_vs_lower="Too low (0.80) makes the agent short-sighted; too close to 1.0 (0.999) makes value estimates noisy on long episodes.",
@@ -524,7 +524,7 @@ def explain_parameters(
 
     ent_guide = _knob(
         parameter="ent_coef",
-        terminology="Entropy Bonus Coefficient (策略熵鼓励系数 ent_coef)",
+        terminology="Entropy Bonus Coefficient (ent_coef)",
         plain_analogy="Curiosity / willingness to keep trying new moves instead of locking onto the first mediocre habit.",
         equivalent_to="A small bonus reward added simply for keeping action probabilities diverse rather than 100% deterministic too early.",
         if_higher_vs_lower="Too low (0.0) risks premature convergence to a bad local trick; too high keeps the agent acting almost randomly.",
@@ -537,7 +537,7 @@ def explain_parameters(
 
     storage_guide = _knob(
         parameter="output_dir & workspace isolation",
-        terminology="Isolated Lab Directory & Artifact Output Path (非侵入工作区与数据保存路径)",
+        terminology="Isolated Lab Directory & Artifact Output Path",
         plain_analogy=(
             "Think of keeping all RL plumbing in a separate lab notebook folder (`./drl_lab/`) so your original simulator/business code stays 100% clean, "
             "while saving learning curves, charts, LaTeX tables, and BibTeX into a dedicated results folder."
@@ -574,7 +574,7 @@ def explain_parameters(
     if uses_epsilon:
         guide["algorithm_specific"]["epsilon_exploration"] = _knob(
             parameter="eps_start / eps_end / exploration_fraction",
-            terminology="Epsilon-Greedy Exploration Rate (贪心探索率 epsilon)",
+            terminology="Epsilon-Greedy Exploration Rate (epsilon)",
             plain_analogy=(
                 "Like choosing restaurants in a new city: at the start (`eps_start=1.0`) you pick randomly to discover what exists; "
                 "later (`eps_end=0.05`) you eat at the highest-rated place 95% of the time and save 5% randomness to keep checking for hidden gems."
@@ -591,7 +591,7 @@ def explain_parameters(
     if uses_ppo:
         guide["algorithm_specific"]["clip_coef"] = _knob(
             parameter="clip_coef",
-            terminology="PPO Clip Ratio / Policy Safety Leash (策略更新安全绳 clip_coef)",
+            terminology="PPO Clip Ratio / Policy Safety Leash (clip_coef)",
             plain_analogy="Like putting a safety leash on how drastically the agent can rewrite its habits after seeing just one noisy batch.",
             equivalent_to="Restricts new/old action probability ratio inside [1 - clip_coef, 1 + clip_coef] (Engstrom et al. / Schulman et al.).",
             if_higher_vs_lower="Too small updates crawl slowly; too large risks collapsing a working policy overnight.",
@@ -604,7 +604,7 @@ def explain_parameters(
     if is_seq:
         guide["algorithm_specific"]["group_size_and_clip_high"] = _knob(
             parameter="group_size & clip_high",
-            terminology="Group Rollout Size & Clip-Higher (组内候选数量与高上限裁剪)",
+            terminology="Group Rollout Size & Clip-Higher",
             plain_analogy="For each prompt, let the model brainstorm K independent solution drafts (`group_size`) and grade them against each other—no Critic model needed!",
             equivalent_to="Larger K lowers advantage variance per prompt; DAPO `clip_high > clip_low` prevents rare reasoning tokens from being silenced.",
             if_higher_vs_lower="Too small K makes relative ranking noisy; larger K multiplies generation compute linearly.",
@@ -617,7 +617,7 @@ def explain_parameters(
     if uses_hil:
         guide["algorithm_specific"]["demo_fraction_and_utd"] = _knob(
             parameter="demo_fraction & utd_ratio",
-            terminology="RLPD Symmetric Demo Ratio & Update-to-Data Ratio (人机演示混合比例与高频回放率)",
+            terminology="RLPD Symmetric Demo Ratio & Update-to-Data Ratio",
             plain_analogy="Every study batch mixes half expert/human intervention memories and half live robot trials, practicing multiple gradient updates per real step.",
             equivalent_to="`demo_fraction=0.5` samples 50% human/demo transitions + 50% online transitions; `utd_ratio` sets updates per env step.",
             if_higher_vs_lower="Higher `utd_ratio` learns fast from few real-world trials but needs LayerNorm critics (`Ba et al.`) to stay stable.",
@@ -630,7 +630,7 @@ def explain_parameters(
     if is_offline:
         guide["algorithm_specific"]["offline_conservatism"] = _knob(
             parameter="cql_alpha / expectile_tau",
-            terminology="Offline Pessimism Coefficient (离线保守防幻觉系数)",
+            terminology="Offline Pessimism Coefficient (cql_alpha / expectile_tau)",
             plain_analogy="When learning strictly from old logs without trying live moves, penalize over-optimism on untested actions so the agent stays grounded.",
             equivalent_to="Higher `cql_alpha` (CQL) keeps policy closer to behavior logs; `expectile_tau` (IQL) tilts value toward top recorded outcomes cleanly.",
             if_higher_vs_lower="Too weak hallucinates high Q-values on missing actions; too strong refuses to improve beyond old behavior.",

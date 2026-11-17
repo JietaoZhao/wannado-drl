@@ -2,6 +2,11 @@
 
 All notable changes to `wannado-drl` will be documented in this file.
 
+## [1.0.5] - 2026-11-17
+
+### Changed
+- **English-first repository consistency**: Removed remaining Chinese UI strings and parenthetical labels from `copilot/planner.py` (`_FAMILY_LABELS`, `explain_parameters()` terminology strings), `SKILL.md` templates, and the `docs/index.html` feedback portal so all public outputs and documentation default strictly to English.
+
 ## [1.0.4] - 2026-11-17
 
 ### Fixed

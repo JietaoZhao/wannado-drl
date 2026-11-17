@@ -1,8 +1,8 @@
 # WannaDo Series: AI-Native Clean-Style Deep Reinforcement Learning Platform — `wannado-drl`
 
-> Part of the **WannaDo** human–AI collaborative scientific research platform · **Release `v1.0.4`**
+> Part of the **WannaDo** human–AI collaborative scientific research platform · **Release `v1.0.5`**
 
-[![Version](https://img.shields.io/badge/version-1.0.4-2563eb)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-1.0.5-2563eb)](pyproject.toml)
 [![Python](https://img.shields.io/badge/python-3.10%2B-0f766e)](pyproject.toml)
 [![Families](https://img.shields.io/badge/families-7%20RL%20taxonomy-7c3aed)](#7-family-algorithm-taxonomy--verified-lineage-27-algorithms)
 [![Algorithms](https://img.shields.io/badge/executable%20algos-27%20single--file-059669)](#7-family-algorithm-taxonomy--verified-lineage-27-algorithms)
