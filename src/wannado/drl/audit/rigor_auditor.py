@@ -95,13 +95,37 @@ def audit_drl_rigor(
         for r in seed_results
         if r.eval_stats is not None
     ]
+    has_live_eval = len(eval_returns) > 0
     if not eval_returns:
         eval_returns = [
-            r.learning_curve[-1]["episode_return"]
+            float(r.learning_curve[-1]["episode_return"])
             for r in seed_results
-            if r.learning_curve
+            if r.learning_curve and "episode_return" in r.learning_curve[-1]
         ]
+    ope_returns = [
+        float(
+            r.train_diagnostics["ope_fqe_value"]
+            if "ope_fqe_value" in r.train_diagnostics
+            else r.train_diagnostics["ope_wis_return"]
+        )
+        for r in seed_results
+        if ("ope_fqe_value" in r.train_diagnostics or "ope_wis_return" in r.train_diagnostics)
+    ]
+    has_ope_eval = len(ope_returns) > 0
+    if not eval_returns and ope_returns:
+        eval_returns = ope_returns
     stats = aggregate_seed_stats(eval_returns)
+
+    checks["has_live_or_ope_evaluation"] = bool(has_live_eval or has_ope_eval or eval_returns)
+    if not checks["has_live_or_ope_evaluation"]:
+        red_flags.append("no_evaluation_metric_recorded")
+        recommendations.append(
+            "No live `eval_stats` or offline OPE metric was recorded; supply `eval_env_or_factory` or run `evaluate_offline_ope`."
+        )
+    elif not has_live_eval and has_ope_eval:
+        recommendations.append(
+            "Pure offline run evaluated via WIS/FQE Off-Policy Evaluation (no live simulator); validate shift/safety before deployment."
+        )
 
     # 1. Multi-seed survivorship & variance check (Henderson 2018 / Agarwal 2021)
     enough_seeds = len(seed_results) >= min_seeds
@@ -121,9 +145,9 @@ def audit_drl_rigor(
             recommendations.append("Report IQM instead of max/best seed, stabilize reward scale, or increase training steps.")
     checks["seed_stability_ok"] = spread_ok
 
-    # 2. Baseline dominance check (Random & Heuristic floor)
+    # 2. Baseline dominance check (Random & Heuristic floor on live environments)
     beat_random = True
-    if rand_base is not None and eval_returns:
+    if rand_base is not None and has_live_eval and eval_returns:
         margin = max(0.05 * abs(rand_base.mean_return), 1e-4)
         if stats["iqm"] <= rand_base.mean_return + margin:
             beat_random = False
@@ -134,7 +158,7 @@ def audit_drl_rigor(
     checks["beats_random_baseline"] = beat_random
 
     beat_heuristic = True
-    if heur_base is not None and eval_returns and stats["iqm"] < heur_base.mean_return:
+    if heur_base is not None and has_live_eval and eval_returns and stats["iqm"] < heur_base.mean_return:
         beat_heuristic = False
         red_flags.append("below_heuristic_baseline")
         recommendations.append(
@@ -237,17 +261,19 @@ def audit_drl_rigor(
                 red_flags.append("q_value_explosion")
                 recommendations.append("Q-values exploded (>1e4); use Double/Twin Q, LayerNorm critics, or gradient clipping.")
 
-        if r.eval_stats is not None and len(r.learning_curve) >= 3:
-            late_train = float(np.mean([p["episode_return"] for p in r.learning_curve[-3:] if "episode_return" in p]))
-            eval_r = r.eval_stats.mean_return
-            collapse_floor = 0.25 if abs(late_train) <= 2.0 else 5.0
-            if late_train > eval_r + max(0.4 * abs(late_train), collapse_floor):
-                train_eval_ok = False
-                if "train_eval_collapse_mismatch" not in red_flags:
-                    red_flags.append("train_eval_collapse_mismatch")
-                    recommendations.append(
-                        f"Late training return ({late_train:.2f}) far exceeds deterministic eval ({eval_r:.2f}); verify seed generalization & normalization freeze."
-                    )
+        if r.eval_stats is not None:
+            ret_pts = [p["episode_return"] for p in r.learning_curve[-3:] if "episode_return" in p]
+            if len(ret_pts) >= 3:
+                late_train = float(np.mean(ret_pts))
+                eval_r = r.eval_stats.mean_return
+                collapse_floor = 0.25 if abs(late_train) <= 2.0 else 5.0
+                if late_train > eval_r + max(0.4 * abs(late_train), collapse_floor):
+                    train_eval_ok = False
+                    if "train_eval_collapse_mismatch" not in red_flags:
+                        red_flags.append("train_eval_collapse_mismatch")
+                        recommendations.append(
+                            f"Late training return ({late_train:.2f}) far exceeds deterministic eval ({eval_r:.2f}); verify seed generalization & normalization freeze."
+                        )
 
     checks["policy_and_critic_health_ok"] = policy_health_ok
     checks["train_eval_consistency_ok"] = train_eval_ok

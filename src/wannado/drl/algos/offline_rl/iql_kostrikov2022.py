@@ -25,6 +25,7 @@ import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
 
 from wannado.drl.core.networks import QNetwork, TwinQCritic, build_mlp
+from wannado.drl.core.offline_risk import evaluate_offline_wis
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, hard_update, polyak_update, resolve_device, set_global_seed
 from wannado.drl.core.wrappers import OfflineTransitionDataset, RunningMeanStd
@@ -40,7 +41,7 @@ META = AlgoMeta(
     sample_efficiency="very_high",
     action_spaces=("discrete", "continuous"),
     env_modalities=("offline_rl", "discrete_control", "continuous_control"),
-    supports_action_mask=False,
+    supports_action_mask=True,
     supports_recurrent=False,
     parent_id="cql",
     diff_from_parent="Replaces OOD action penalization with in-sample expectile V(s) regression + Advantage-Weighted Regression (AWR).",
@@ -150,7 +151,9 @@ def train_iql_offline(
 
     t0 = time.perf_counter()
     learning_curve: list[dict[str, float]] = []
-    v_losses, q_losses = [], []
+    v_losses, q_losses, q_hist = [], [], []
+    masks_raw = dataset.extra.get("action_masks")
+    masks_all = np.asarray(masks_raw, dtype=np.bool_) if (dataset.is_discrete and masks_raw is not None) else None
 
     for step in range(1, cfg.num_grad_steps + 1):
         idx = rng.integers(0, n_data, size=cfg.batch_size)
@@ -182,11 +185,16 @@ def train_iql_offline(
             with torch.no_grad():
                 adv = target_q(b_obs).gather(1, b_act.unsqueeze(1)).squeeze(1) - v_net(b_obs).squeeze(-1)
                 weights = torch.exp(cfg.awr_beta * adv).clamp(max=cfg.max_awr_weight)
-            log_probs = Categorical(logits=actor_logits(b_obs)).log_prob(b_act)
+            logits_b = actor_logits(b_obs)
+            if masks_all is not None:
+                b_mask = torch.as_tensor(masks_all[idx], device=dev, dtype=torch.bool).scatter(1, b_act.unsqueeze(1), True)
+                logits_b = logits_b.masked_fill(~b_mask, -1e9)
+            log_probs = Categorical(logits=logits_b).log_prob(b_act)
             actor_loss = -(weights * log_probs).mean()
             actor_opt.zero_grad()
             actor_loss.backward()
             actor_opt.step()
+            q_hist.append(float(q_pred.mean().item()))
         else:
             b_act = torch.as_tensor(dataset.actions[idx], device=dev, dtype=torch.float32)
             with torch.no_grad():
@@ -220,6 +228,7 @@ def train_iql_offline(
             actor_opt.zero_grad()
             actor_loss.backward()
             actor_opt.step()
+            q_hist.append(float(q1.mean().item()))
 
         v_losses.append(float(v_loss.item()))
         q_losses.append(float(q_loss.item()))
@@ -229,14 +238,21 @@ def train_iql_offline(
     if dataset.is_discrete:
         model_obj: Any = {"actor": actor_logits, "q": q_net, "v": v_net}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
+        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor_logits), torch.no_grad():
-                return int(torch.argmax(actor_logits(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0))).item())
+                logits_p = actor_logits(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0)
+                mask = (info_in or {}).get("action_mask")
+                if mask is not None:
+                    m_t = torch.as_tensor(mask, device=dev, dtype=torch.bool).view_as(logits_p)
+                    if bool(m_t.any()):
+                        logits_p = logits_p.masked_fill(~m_t, -1e9)
+                return int(torch.argmax(logits_p).item())
     else:
         model_obj = {"actor": actor_mean, "q": q_net_twin, "v": v_net}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
+        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
+            _ = info_in
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor_mean), torch.no_grad():
                 m = torch.tanh(actor_mean(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)))
@@ -245,6 +261,11 @@ def train_iql_offline(
     eval_stats = (
         evaluate_policy_episodes(eval_env_or_factory, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
         if eval_env_or_factory is not None
+        else None
+    )
+    ope_stats = (
+        evaluate_offline_wis(dataset, policy_fn, gamma=cfg.gamma)
+        if eval_stats is None
         else None
     )
 
@@ -260,6 +281,18 @@ def train_iql_offline(
         train_diagnostics={
             "mean_expectile_v_loss": float(np.mean(v_losses)) if v_losses else 0.0,
             "mean_q_loss": float(np.mean(q_losses)) if q_losses else 0.0,
+            "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
+            "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
+            "is_continuous": 0.0 if dataset.is_discrete else 1.0,
+            **(
+                {
+                    "ope_wis_return": float(ope_stats["wis_return"]),
+                    "ope_behavior_return": float(ope_stats["behavior_return"]),
+                    "ope_effective_sample_size": float(ope_stats["effective_sample_size"]),
+                }
+                if ope_stats is not None
+                else {}
+            ),
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

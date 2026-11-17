@@ -9,7 +9,8 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
-from torch.distributions import Categorical, Normal
+from torch.distributions import Categorical, Distribution, Normal
+from torch.distributions.kl import kl_divergence, register_kl
 
 
 def layer_init(layer: nn.Linear, std: float = math.sqrt(2.0), bias_const: float = 0.0) -> nn.Linear:
@@ -74,6 +75,85 @@ class DiscreteActorCritic(nn.Module):
         dist = self.get_dist(obs, action_mask=action_mask)
         if action is None:
             action = dist.logits.argmax(dim=-1) if deterministic else dist.sample()
+        return action, dist.log_prob(action), dist.entropy(), self.get_value(obs)
+
+
+_EMPTY_SAMPLE_SHAPE = torch.Size()
+
+
+class MultiCategorical(Distribution):
+    """Factorized product of Categorical distributions over MultiDiscrete / MultiBinary branches."""
+
+    has_enumerate_support = False
+
+    def __init__(self, logits_list: Sequence[torch.Tensor]) -> None:
+        self.dists = [Categorical(logits=logits) for logits in logits_list]
+        batch_shape = self.dists[0].batch_shape if self.dists else torch.Size()
+        super().__init__(batch_shape=batch_shape, event_shape=torch.Size((len(self.dists),)), validate_args=False)
+
+    @property
+    def logits_list(self) -> list[torch.Tensor]:
+        return [d.logits for d in self.dists]
+
+    def detached_copy(self) -> MultiCategorical:
+        return MultiCategorical([d.logits.detach() for d in self.dists])
+
+    def sample(
+        self,
+        sample_shape: torch.Size | list[int] | tuple[int, ...] = _EMPTY_SAMPLE_SHAPE,
+    ) -> torch.Tensor:
+        return torch.stack([d.sample(sample_shape) for d in self.dists], dim=-1)
+
+    def argmax_action(self) -> torch.Tensor:
+        return torch.stack([d.logits.argmax(dim=-1) for d in self.dists], dim=-1)
+
+    def log_prob(self, value: torch.Tensor) -> torch.Tensor:
+        return torch.stack([d.log_prob(value[..., i]) for i, d in enumerate(self.dists)], dim=-1).sum(dim=-1)
+
+    def entropy(self) -> torch.Tensor:
+        return torch.stack([d.entropy() for d in self.dists], dim=-1).sum(dim=-1)
+
+
+@register_kl(MultiCategorical, MultiCategorical)
+def _kl_multicategorical(p: MultiCategorical, q: MultiCategorical) -> torch.Tensor:
+    return torch.stack([kl_divergence(dp, dq) for dp, dq in zip(p.dists, q.dists, strict=True)], dim=-1).sum(dim=-1)
+
+
+class MultiDiscreteActorCritic(nn.Module):
+    """Factorized Actor-Critic supporting arbitrary-cardinality MultiDiscrete and MultiBinary spaces."""
+
+    def __init__(
+        self,
+        obs_dim: int,
+        action_nvec: Sequence[int],
+        hidden_dims: Sequence[int] = (64, 64),
+    ) -> None:
+        super().__init__()
+        self.action_nvec = tuple(int(v) for v in action_nvec)
+        total_logits = int(sum(self.action_nvec))
+        self.critic = build_mlp(obs_dim, hidden_dims, 1, activation=nn.Tanh, orthogonal_init=True, last_std=1.0)
+        self.actor = build_mlp(obs_dim, hidden_dims, total_logits, activation=nn.Tanh, orthogonal_init=True, last_std=0.01)
+
+    def get_value(self, obs: torch.Tensor) -> torch.Tensor:
+        return self.critic(obs).squeeze(-1)
+
+    def get_dist(self, obs: torch.Tensor, action_mask: torch.Tensor | None = None) -> MultiCategorical:
+        logits = self.actor(obs)
+        if action_mask is not None and action_mask.shape[-1] == logits.shape[-1]:
+            logits = logits.masked_fill(~action_mask.bool(), -1e8)
+        splits = torch.split(logits, list(self.action_nvec), dim=-1)
+        return MultiCategorical(splits)
+
+    def get_action_and_value(
+        self,
+        obs: torch.Tensor,
+        action: torch.Tensor | None = None,
+        action_mask: torch.Tensor | None = None,
+        deterministic: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        dist = self.get_dist(obs, action_mask=action_mask)
+        if action is None:
+            action = dist.argmax_action() if deterministic else dist.sample()
         return action, dist.log_prob(action), dist.entropy(), self.get_value(obs)
 
 
@@ -153,15 +233,18 @@ class RecurrentActorCriticGRU(nn.Module):
         is_discrete: bool = True,
         action_low: np.ndarray | None = None,
         action_high: np.ndarray | None = None,
+        action_nvec: Sequence[int] | None = None,
     ) -> None:
         super().__init__()
         self.is_discrete = is_discrete
+        self.action_nvec = tuple(int(v) for v in action_nvec) if action_nvec is not None else None
         self.hidden_dim = hidden_dim
         self.encoder = nn.Sequential(layer_init(nn.Linear(obs_dim, hidden_dim)), nn.Tanh())
         self.gru = nn.GRU(hidden_dim, hidden_dim, batch_first=False)
         self.critic = layer_init(nn.Linear(hidden_dim, 1), std=1.0)
-        self.actor = layer_init(nn.Linear(hidden_dim, action_dim), std=0.01)
-        if not is_discrete:
+        out_dim = int(sum(self.action_nvec)) if (self.action_nvec is not None and not is_discrete) else action_dim
+        self.actor = layer_init(nn.Linear(hidden_dim, out_dim), std=0.01)
+        if not is_discrete and self.action_nvec is None:
             self.actor_logstd = nn.Parameter(torch.zeros(1, action_dim))
         scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
         self.register_buffer("action_scale", scale_t)
@@ -193,12 +276,17 @@ class RecurrentActorCriticGRU(nn.Module):
         self,
         feats: torch.Tensor,
         action_mask: torch.Tensor | None = None,
-    ) -> Categorical | Normal:
+    ) -> Categorical | MultiCategorical | Normal:
         if self.is_discrete:
             logits = self.actor(feats)
             if action_mask is not None:
                 logits = logits.masked_fill(~action_mask.bool(), -1e8)
             return Categorical(logits=logits)
+        if self.action_nvec is not None:
+            logits = self.actor(feats)
+            if action_mask is not None and action_mask.shape[-1] == logits.shape[-1]:
+                logits = logits.masked_fill(~action_mask.bool(), -1e8)
+            return MultiCategorical(torch.split(logits, list(self.action_nvec), dim=-1))
         mean = self.action_bias + self.action_scale * self.actor(feats)
         std = self.action_scale * torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
         return Normal(mean, std)
@@ -222,6 +310,14 @@ class RecurrentActorCriticGRU(nn.Module):
             if action is None:
                 action = logits.argmax(dim=-1) if deterministic else disc_dist.sample()
             return action, disc_dist.log_prob(action), disc_dist.entropy(), val, h_next
+        if self.action_nvec is not None:
+            logits = self.actor(feat)
+            if action_mask is not None and action_mask.shape[-1] == logits.shape[-1]:
+                logits = logits.masked_fill(~action_mask.bool(), -1e8)
+            md_dist = MultiCategorical(torch.split(logits, list(self.action_nvec), dim=-1))
+            if action is None:
+                action = md_dist.argmax_action() if deterministic else md_dist.sample()
+            return action, md_dist.log_prob(action), md_dist.entropy(), val, h_next
         mean = self.action_bias + self.action_scale * self.actor(feat)
         std = self.action_scale * torch.exp(self.actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
         cont_dist = Normal(mean, std)

@@ -24,7 +24,7 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic
+from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic, MultiDiscreteActorCritic
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, resolve_device, set_global_seed
 from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
@@ -108,9 +108,11 @@ def train_reinforce(
     dev = resolve_device(cfg.device)
     env = ensure_gym_env(env_or_factory)
 
-    net: DiscreteActorCritic | ContinuousActorCritic
+    net: DiscreteActorCritic | MultiDiscreteActorCritic | ContinuousActorCritic
     if env.is_discrete:
         net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
+    elif env.action_nvec is not None:
+        net = MultiDiscreteActorCritic(env.obs_dim, env.action_nvec, hidden_dims=cfg.hidden_dims).to(dev)
     else:
         net = ContinuousActorCritic(
             env.obs_dim,
@@ -181,7 +183,7 @@ def train_reinforce(
         b_obs = torch.as_tensor(np.asarray(ep_obs, dtype=np.float32), device=dev)
         b_ret = torch.as_tensor(returns, device=dev)
         b_act = torch.as_tensor(
-            np.asarray(ep_acts, dtype=np.int64 if env.is_discrete else np.float32), device=dev
+            np.asarray(ep_acts, dtype=np.int64 if (env.is_discrete or env.action_nvec is not None) else np.float32), device=dev
         )
         b_mask = torch.as_tensor(np.asarray(ep_masks, dtype=np.bool_), device=dev) if env.is_discrete else None
 
@@ -242,7 +244,7 @@ def train_reinforce(
         train_diagnostics={
             "mean_entropy": float(np.mean(entropies)) if entropies else 0.0,
             "final_entropy": float(entropies[-1]) if entropies else 0.0,
-            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
             **(
                 {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
                 if isinstance(net, ContinuousActorCritic)

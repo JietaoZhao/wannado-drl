@@ -1,7 +1,7 @@
 cff-version: 1.2.0
 message: "If you use wannado-drl in your research, please cite it using this metadata."
 title: "wannado-drl: AI-Native CleanRL-Style Deep Reinforcement Learning Platform"
-version: 1.0.3
+version: 1.0.4
 date-released: "2026-11-17"
 license: MIT
 repository-code: "https://github.com/JietaoZhao/wannado-drl"

@@ -24,7 +24,7 @@ import torch
 import torch.nn.functional as F
 from torch.distributions import Categorical, Normal
 
-from wannado.drl.core.networks import RecurrentActorCriticGRU
+from wannado.drl.core.networks import MultiCategorical, RecurrentActorCriticGRU
 from wannado.drl.core.provenance import resolve_run_optimizations
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import compute_gae, eval_mode, explained_variance, resolve_device, set_global_seed
@@ -118,6 +118,7 @@ def train_ppo_gru(
         is_discrete=env.is_discrete,
         action_low=env.action_low,
         action_high=env.action_high,
+        action_nvec=env.action_nvec if not env.is_discrete else None,
     ).to(dev)
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr, eps=1e-5)
     obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
@@ -214,7 +215,7 @@ def train_ppo_gru(
 
         b_obs = torch.as_tensor(np.asarray(seq_obs, dtype=np.float32), device=dev).unsqueeze(1)
         b_done = torch.as_tensor(np.asarray(seq_done, dtype=np.float32), device=dev).unsqueeze(1)
-        b_act = torch.as_tensor(np.asarray(seq_act, dtype=np.int64 if env.is_discrete else np.float32), device=dev)
+        b_act = torch.as_tensor(np.asarray(seq_act, dtype=np.int64 if (env.is_discrete or env.action_nvec is not None) else np.float32), device=dev)
         b_old_lp = torch.as_tensor(np.asarray(seq_lp, dtype=np.float32), device=dev)
         b_adv = torch.as_tensor(adv_arr, device=dev)
         b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
@@ -231,6 +232,11 @@ def train_ppo_gru(
                 if b_mask is not None:
                     logits = logits.masked_fill(~b_mask, -1e8)
                 dist: Any = Categorical(logits=logits)
+                new_lp = dist.log_prob(b_act)
+                entropy = dist.entropy()
+            elif net.action_nvec is not None:
+                logits = net.actor(feats)
+                dist = MultiCategorical(torch.split(logits, list(net.action_nvec), dim=-1))
                 new_lp = dist.log_prob(b_act)
                 entropy = dist.entropy()
             else:
@@ -291,10 +297,10 @@ def train_ppo_gru(
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
             "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
-            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
             **(
                 {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
-                if not env.is_discrete
+                if hasattr(net, "actor_logstd")
                 else {}
             ),
         },

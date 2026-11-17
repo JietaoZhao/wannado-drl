@@ -2,6 +2,23 @@
 
 All notable changes to `wannado-drl` will be documented in this file.
 
+## [1.0.4] - 2026-11-17
+
+### Fixed
+- **Legacy OpenAI `gym`, `Dict`/`Tuple`/`Discrete`/`MultiDiscrete`/`MultiBinary` & VectorEnv compatibility (`core/wrappers.py`, `core/networks.py`)**:
+  - Updated `_is_non_numeric_space()`, `_flatten_obs()`, and `_infer_flat_obs_dim()` with structural space duck-typing so legacy `gym==0.26` `Dict`/`Tuple`/`Discrete`/`MultiDiscrete`/`MultiBinary` spaces never trigger `gymnasium.spaces.flatdim()` `NotImplementedError`.
+  - Fixed `MultiBinary` misidentification in `_coerce_action_space()` (no longer coerced to scalar `Discrete`) and added full `MultiDiscrete` + `MultiBinary` support via joint discrete mapping (`prod <= 256`) and native factorized `MultiDiscreteActorCritic` (`MultiCategorical` with registered KL) across `ppo`, `a2c`, `trpo`, `reinforce`, and `ppo_gru`.
+  - Added native `SyncVectorEnv` / `AsyncVectorEnv` (`VectorEnv`) handling in `UniversalGymAdapter` and `preflight_env()`.
+- **Offline RL Rigor Audit crashes & warnings (`audit/rigor_auditor.py`, `reporter/paper_reporter.py`)**:
+  - Eliminated `KeyError: 'episode_return'` and `RuntimeWarning: Mean of empty slice` when auditing `train_cql()` / `train_iql_offline()` loss-based `learning_curve` records, and added `mean_q_value`/`max_q_value` diagnostics to `train_iql_offline()`.
+  - Enabled end-to-end simulator-free `preflight_env(dataset)` and `evaluate_drl_suite(dataset, ["cql", "iql_offline"], run_audit=True)` backed by automated Off-Policy Evaluation (`WIS` + `FQE`).
+- **Heterogeneous asymmetric Multi-Agent observations (`core/wrappers.py`, `algos/multi_agent/mappo_yu2022.py`)**: Zero-pads differing per-agent observation lengths cleanly inside `MultiAgentEnvAdapter` and `_stack_local_obs()`.
+- **LaTeX & Co-Pilot domain inference (`reporter/paper_reporter.py`, `copilot/project_inspector.py`, `copilot/planner.py`)**: Added `#`/`^`/`~` escaping in `to_latex()`, continuous `Box` / offline detection in `scan_project()` & `inspect`, and `query` / `task_goal` arguments on `build_interactive_brief()` and `recommend_algo_suite()`.
+
+### Added
+- **Cross-domain Offline, OPE & Risk-Control Primitives (`core/offline_risk.py`)**: Added `evaluate_offline_wis()`, `evaluate_offline_fqe()`, `evaluate_offline_ope()` (with subgroup cohort breakdown), `compute_cvar()`, `compute_sharpe_and_drawdown()`, `apply_simplex_projection()`, and `PortfolioSimplexWrapper`, plus `action_masks`/`next_action_masks` support in `CQL`/`IQL` and `OfflineTransitionDataset.from_arrays()`.
+- **Expanded Stage 0 Domain Archetypes (`mdp/intake.py`)**: Added `finance_portfolio_risk`, `clinical_offline_safety`, and `cyber_attack_defense` templates.
+
 ## [1.0.3] - 2026-11-17
 
 ### Fixed

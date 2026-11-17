@@ -18,6 +18,7 @@ from wannado.drl.algos import ALGO_ID_TO_RUNNER
 from wannado.drl.audit.preflight import PreflightReport, preflight_env
 from wannado.drl.audit.rigor_auditor import RigorAuditReport, audit_drl_rigor
 from wannado.drl.catalog.build_catalog import load_catalog
+from wannado.drl.core.offline_risk import evaluate_offline_ope
 from wannado.drl.core.provenance import (
     ALGO_DEFAULT_OPTIMIZATIONS,
     OPTIMIZATION_PROVENANCE,
@@ -25,6 +26,7 @@ from wannado.drl.core.provenance import (
 )
 from wannado.drl.core.types import EpisodeEvalStats, TrainResult
 from wannado.drl.core.utils import aggregate_seed_stats
+from wannado.drl.core.wrappers import OfflineTransitionDataset
 from wannado.drl.mdp.spec import MDPSpec
 
 
@@ -330,7 +332,14 @@ class DRLReport:
 
     def to_latex(self) -> str:
         def _esc(val: str) -> str:
-            return val.replace("&", "\\&").replace("_", "\\_").replace("%", "\\%")
+            return (
+                val.replace("&", "\\&")
+                .replace("_", "\\_")
+                .replace("%", "\\%")
+                .replace("#", "\\#")
+                .replace("^", "\\^{}")
+                .replace("~", "\\~{}")
+            )
 
         lines = [
             "% Requires \\usepackage{booktabs}",
@@ -578,10 +587,31 @@ def evaluate_drl_suite(
                 res = fn(target, config=default_cfg) if default_cfg is not None else fn(target)
             seed_runs.append(res)
 
-        eval_vals = [
-            r.eval_stats.mean_return if r.eval_stats is not None else (r.learning_curve[-1]["episode_return"] if r.learning_curve else 0.0)
-            for r in seed_runs
-        ]
+        if isinstance(env_or_factory, OfflineTransitionDataset):
+            eval_vals = []
+            for r in seed_runs:
+                if r.eval_stats is not None:
+                    eval_vals.append(r.eval_stats.mean_return)
+                else:
+                    gamma_r = float(r.config.get("gamma", 0.99)) if isinstance(r.config, dict) else 0.99
+                    ope = evaluate_offline_ope(env_or_factory, r.policy_fn, gamma=gamma_r, seed=r.seed + 20_000)
+                    r.train_diagnostics["ope_fqe_value"] = float(ope["fqe"]["fqe_initial_value"])
+                    r.train_diagnostics["ope_fqe_cvar_05"] = float(ope["fqe"]["fqe_cvar_alpha"])
+                    r.train_diagnostics["ope_wis_return"] = float(ope["wis"]["wis_return"])
+                    r.train_diagnostics["ope_behavior_return"] = float(ope["behavior_return"])
+                    r.extra["ope"] = ope
+                    eval_vals.append(float(ope["primary_ope_value"]))
+        else:
+            eval_vals = [
+                r.eval_stats.mean_return
+                if r.eval_stats is not None
+                else (
+                    float(r.learning_curve[-1]["episode_return"])
+                    if r.learning_curve and "episode_return" in r.learning_curve[-1]
+                    else float(r.train_diagnostics.get("ope_fqe_value", r.train_diagnostics.get("ope_wis_return", 0.0)))
+                )
+                for r in seed_runs
+            ]
         audit = (
             audit_drl_rigor(
                 seed_runs,

@@ -15,8 +15,9 @@ from typing import Any
 
 import numpy as np
 
+from wannado.drl.core.offline_risk import compute_cvar
 from wannado.drl.core.types import EpisodeEvalStats
-from wannado.drl.core.wrappers import MultiAgentEnvAdapter, SequenceTaskEnv, ensure_gym_env
+from wannado.drl.core.wrappers import MultiAgentEnvAdapter, OfflineTransitionDataset, SequenceTaskEnv, ensure_gym_env
 from wannado.drl.mdp.baselines import evaluate_heuristic_baseline, evaluate_random_baseline
 
 
@@ -103,9 +104,90 @@ def preflight_env(
         callable(env_or_factory)
         and (isinstance(env_or_factory, type) or not hasattr(env_or_factory, "step"))
         and not hasattr(env_or_factory, "possible_agents")
-        and not isinstance(env_or_factory, (SequenceTaskEnv, MultiAgentEnvAdapter))
+        and not isinstance(env_or_factory, (SequenceTaskEnv, MultiAgentEnvAdapter, OfflineTransitionDataset))
     ):
         probe_target = env_or_factory()
+
+    if isinstance(probe_target, OfflineTransitionDataset):
+        t0 = time.perf_counter()
+        n = len(probe_target)
+        if n < 2:
+            errors.append("OfflineTransitionDataset contains fewer than 2 transitions.")
+        if not np.all(np.isfinite(probe_target.obs)) or not np.all(np.isfinite(probe_target.next_obs)):
+            errors.append("OfflineTransitionDataset contains NaN or Inf observations.")
+        if not np.all(np.isfinite(probe_target.rewards)):
+            errors.append("OfflineTransitionDataset contains NaN or Inf rewards.")
+        obs_abs_max = float(np.max(np.abs(probe_target.obs))) if probe_target.obs.size else 0.0
+        max_abs_r = float(np.max(np.abs(probe_target.rewards))) if probe_target.rewards.size else 0.0
+        if max_abs_r > 100.0:
+            warnings.append(
+                f"Large per-step reward magnitude in offline log (max |r|={max_abs_r:.1f}); consider reward scaling."
+            )
+        if obs_abs_max > 50.0:
+            recommendations.append(
+                f"Offline observations reach |obs|={obs_abs_max:.1f}; keep `normalize_obs=True` (computed strictly on logged obs)."
+            )
+
+        term_idx = np.flatnonzero(probe_target.terminateds > 0.5)
+        ep_ids_raw = probe_target.extra.get("episode_ids")
+        off_ep_rets: list[float] = []
+        off_ep_lens: list[int] = []
+        if ep_ids_raw is not None and len(ep_ids_raw) == n:
+            start = 0
+            for i in range(1, n):
+                if ep_ids_raw[i] != ep_ids_raw[i - 1]:
+                    off_ep_rets.append(float(np.sum(probe_target.rewards[start:i])))
+                    off_ep_lens.append(i - start)
+                    start = i
+            off_ep_rets.append(float(np.sum(probe_target.rewards[start:n])))
+            off_ep_lens.append(n - start)
+        elif term_idx.size > 0:
+            start = 0
+            for end_i in term_idx:
+                off_ep_rets.append(float(np.sum(probe_target.rewards[start : int(end_i) + 1])))
+                off_ep_lens.append(int(end_i) + 1 - start)
+                start = int(end_i) + 1
+            if start < n:
+                off_ep_rets.append(float(np.sum(probe_target.rewards[start:n])))
+                off_ep_lens.append(n - start)
+        else:
+            off_ep_rets.append(float(np.sum(probe_target.rewards)))
+            off_ep_lens.append(n)
+
+        beh_stats = EpisodeEvalStats(
+            returns=off_ep_rets,
+            lengths=off_ep_lens,
+            mean_return=float(np.mean(off_ep_rets)) if off_ep_rets else 0.0,
+            std_return=float(np.std(off_ep_rets)) if off_ep_rets else 0.0,
+            mean_length=float(np.mean(off_ep_lens)) if off_ep_lens else float(n),
+        )
+        dt_ms = max(0.001, (time.perf_counter() - t0) * 1000.0)
+        ok = len(errors) == 0
+        rep = PreflightReport(
+            ok=ok,
+            env_library="offline_dataset",
+            obs_dim=probe_target.obs_dim,
+            action_space_kind="discrete" if probe_target.is_discrete else "continuous",
+            action_dim=probe_target.action_dim,
+            ms_per_step=round(dt_ms / max(1, min(n, 1000)), 4),
+            steps_per_sec=round(1000.0 / max(dt_ms / max(1, min(n, 1000)), 1e-4), 1),
+            warnings=warnings,
+            errors=errors,
+            recommendations=recommendations,
+            random_baseline=beh_stats,
+            summary={
+                "num_transitions": n,
+                "num_episodes_estimated": len(off_ep_rets),
+                "behavior_mean_return": beh_stats.mean_return,
+                "behavior_cvar_05": compute_cvar(off_ep_rets, alpha=0.05),
+                "obs_abs_max": obs_abs_max,
+                "max_abs_reward": max_abs_r,
+                "saw_action_mask": "action_masks" in probe_target.extra,
+            },
+        )
+        if strict and not ok:
+            raise ValueError("; ".join(errors))
+        return rep
 
     if isinstance(probe_target, SequenceTaskEnv):
         rng = np.random.default_rng(seed)
@@ -208,7 +290,7 @@ def preflight_env(
         )
 
     env = ensure_gym_env(probe_target, heuristic_fn=heuristic_fn)
-    act_kind = "discrete" if env.is_discrete else "continuous"
+    act_kind = env.raw_action_kind
 
     # 1. Seeded reset reproducibility check
     obs_a, _info_a = env.reset(seed=seed)
@@ -247,6 +329,8 @@ def preflight_env(
                 act: Any = int(rng.choice(valid))
             else:
                 act = int(rng.integers(0, env.action_dim))
+        elif env.action_nvec is not None:
+            act = np.asarray([int(rng.integers(0, k)) for k in env.action_nvec], dtype=np.int64)
         else:
             low_raw = env.action_low if env.action_low is not None else np.full(env.action_dim, -1.0, dtype=np.float32)
             high_raw = env.action_high if env.action_high is not None else np.full(env.action_dim, 1.0, dtype=np.float32)
@@ -336,6 +420,8 @@ def preflight_env(
             "saw_task_metrics": saw_task_metrics,
             "probed_steps": len(rews),
             "completed_episodes_in_probe": len(ep_lengths),
+            **({"is_vector_env": True, "num_envs": env.num_envs} if env.is_vector_env else {}),
+            **({"action_nvec": list(env.action_nvec)} if env.action_nvec is not None else {}),
         },
     )
     if strict and not ok:

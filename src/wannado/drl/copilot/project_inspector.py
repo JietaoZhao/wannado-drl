@@ -35,6 +35,9 @@ _IGNORE_DIRS = {
 _DOMAIN_SIGNALS: dict[str, tuple[str, ...]] = {
     "wireless_scheduling": ("ofdm", "sinr", "snr", "cqi", "channel", "throughput", "base_station", "resource_block", "tti", "queue"),
     "continuous_control": ("torque", "velocity", "joint", "pendulum", "mujoco", "dm_control", "pid", "trajectory", "robotics", "gripper"),
+    "finance_portfolio_risk": ("portfolio", "sharpe", "cvar", "drawdown", "trading", "ticker", "ohlcv", "backtest", "allocation", "anytrading", "asset_weights"),
+    "clinical_offline_safety": ("clinical", "sepsis", "icu", "patient", "ehr", "dosage", "vitals", "sofa", "mortality", "treatment", "mimic", "medical"),
+    "cyber_attack_defense": ("cyber", "intrusion", "firewall", "honeypot", "malware", "pentest", "vulnerability", "network_defense", "nasim", "cyborg"),
     "multi_agent": ("pettingzoo", "parallel_env", "aec_env", "possible_agents", "mappo", "qmix", "vdn", "multi_agent"),
     "reasoning_sequence": ("prompt", "tokenizer", "reasoning", "verifier", "grpo", "dapo", "gspo", "arpo", "tool_call"),
     "offline_rl": ("offline_dataset", "d4rl", "replay_dataset", "behavior_cloning", "logged_transitions", "cql", "iql"),
@@ -50,6 +53,18 @@ _ARCHETYPE_GOAL_TEMPLATES: dict[str, tuple[str, str]] = {
     "continuous_control": (
         "This looks like a physics / robotics / continuous feedback control project.",
         "Train a continuous-action DRL controller to apply smooth torques, velocities, or actuator commands for stable trajectory tracking or manipulation.",
+    ),
+    "finance_portfolio_risk": (
+        "This looks like a quantitative finance, portfolio allocation, or algorithmic trading risk-control project.",
+        "Train a risk-sensitive DRL allocation policy on simplex/portfolio weights maximizing Sharpe/return net of transaction costs while controlling CVaR drawdown risk.",
+    ),
+    "clinical_offline_safety": (
+        "This looks like a clinical / healthcare decision support or retrospective patient trajectory project.",
+        "Train a conservative offline DRL policy (CQL/IQL) with clinical safety action masks and validate via WIS/FQE Off-Policy Evaluation before live deployment.",
+    ),
+    "cyber_attack_defense": (
+        "This looks like a cybersecurity / automated network defense or intrusion response simulation.",
+        "Train an action-masked or multi-discrete DRL defender (PPO/Double-DQN) balancing threat containment against host/service availability.",
     ),
     "multi_agent": (
         "This looks like a multi-agent decision / decentralized coordination environment.",
@@ -129,6 +144,7 @@ class ProjectScan:
     project_summary_guess: str = ""
     understanding_confidence: str = "low"
     inferred_drl_goal: str = ""
+    inferred_action_space: str = "unknown"
     candidate_goals: list[str] = field(default_factory=list)
     evidence_clues: list[str] = field(default_factory=list)
 
@@ -207,6 +223,7 @@ def scan_project(project_dir: str | Path = ".", max_files: int = 200) -> Project
     doc_snippets: list[str] = []
     matched_kws: dict[str, list[str]] = {k: [] for k in _DOMAIN_SIGNALS}
     domain_scores: dict[str, int] = {k: 0 for k in _DOMAIN_SIGNALS}
+    action_space_hits: dict[str, int] = {"continuous": 0, "discrete": 0, "multi_discrete": 0}
     fp_parts: list[str] = []
 
     for fpath in py_files:
@@ -262,6 +279,12 @@ def scan_project(project_dir: str | Path = ".", max_files: int = 200) -> Project
                 sim_candidates.append(rel)
             if any(tok in low_rel for tok in ("train", "run", "main", "sim", "env", "sched")):
                 entry_candidates.append(rel)
+            if re.search(r"action_space\s*=\s*(?:spaces\.|gym\.spaces\.|gymnasium\.spaces\.)?Box\b", text) or "spaces.box" in low_txt:
+                action_space_hits["continuous"] += 1
+            if re.search(r"action_space\s*=\s*(?:spaces\.|gym\.spaces\.|gymnasium\.spaces\.)?MultiDiscrete\b", text):
+                action_space_hits["multi_discrete"] += 1
+            if re.search(r"action_space\s*=\s*(?:spaces\.|gym\.spaces\.|gymnasium\.spaces\.)?Discrete\b", text):
+                action_space_hits["discrete"] += 1
             for dom, kws in _DOMAIN_SIGNALS.items():
                 hits = [kw for kw in kws if kw in low_txt]
                 if hits:
@@ -281,12 +304,24 @@ def scan_project(project_dir: str | Path = ".", max_files: int = 200) -> Project
         mode = "multi_agent_env"
     elif best_arch == "reasoning_sequence":
         mode = "reasoning_sequence_task"
-    elif best_arch == "offline_rl" or (datasets and not env_files and not sim_candidates):
+    elif best_arch in ("offline_rl", "clinical_offline_safety") or (datasets and not env_files and not sim_candidates):
         mode = "offline_dataset"
     elif env_files or "Gymnasium" in frameworks or "Legacy OpenAI Gym" in frameworks or "dm_control" in frameworks:
         mode = "existing_gym_or_gymnasium"
     else:
         mode = "raw_simulator_needs_mdp"
+
+    inferred_action_space = "unknown"
+    if action_space_hits["multi_discrete"] > 0:
+        inferred_action_space = "multi_discrete"
+    elif action_space_hits["continuous"] > action_space_hits["discrete"]:
+        inferred_action_space = "continuous"
+    elif action_space_hits["discrete"] > 0:
+        inferred_action_space = "discrete"
+    elif best_arch in ("continuous_control", "finance_portfolio_risk"):
+        inferred_action_space = "continuous"
+    elif best_arch == "cyber_attack_defense":
+        inferred_action_space = "discrete"
 
     readme_title, readme_excerpt = _extract_readme_summary(root)
     existing_lab_dirs = [d for d in ("drl_lab", "wannado_drl_lab") if (root / d).is_dir()]
@@ -365,6 +400,7 @@ def scan_project(project_dir: str | Path = ".", max_files: int = 200) -> Project
         project_summary_guess=summary_guess,
         understanding_confidence=confidence,
         inferred_drl_goal=inferred_goal,
+        inferred_action_space=inferred_action_space,
         candidate_goals=candidate_goals[:3],
         evidence_clues=clues,
     )

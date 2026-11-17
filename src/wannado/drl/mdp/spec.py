@@ -25,6 +25,8 @@ class ActionSpaceSpec:
 
     kind: Literal[
         "discrete",
+        "multi_discrete",
+        "multi_binary",
         "continuous",
         "multi_agent_discrete",
         "multi_agent_continuous",

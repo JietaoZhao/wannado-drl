@@ -25,7 +25,12 @@ from torch import nn
 from torch.distributions import kl_divergence
 
 from wannado.drl.core.buffers import RolloutBuffer
-from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic
+from wannado.drl.core.networks import (
+    ContinuousActorCritic,
+    DiscreteActorCritic,
+    MultiCategorical,
+    MultiDiscreteActorCritic,
+)
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, explained_variance, resolve_device, set_global_seed
 from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
@@ -142,12 +147,17 @@ def train_trpo(
     dev = resolve_device(cfg.device)
     env = ensure_gym_env(env_or_factory)
 
-    net: DiscreteActorCritic | ContinuousActorCritic
+    net: DiscreteActorCritic | MultiDiscreteActorCritic | ContinuousActorCritic
     act_dtype: np.dtype[Any]
     if env.is_discrete:
         net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
         actor_params = list(net.actor.parameters())
         act_shape: tuple[int, ...] = ()
+        act_dtype = np.dtype(np.int64)
+    elif env.action_nvec is not None:
+        net = MultiDiscreteActorCritic(env.obs_dim, env.action_nvec, hidden_dims=cfg.hidden_dims).to(dev)
+        actor_params = list(net.actor.parameters())
+        act_shape = (len(env.action_nvec),)
         act_dtype = np.dtype(np.int64)
     else:
         net = ContinuousActorCritic(
@@ -256,7 +266,9 @@ def train_trpo(
 
         with torch.no_grad():
             old_dist = _get_dist(b_obs, b_mask)
-            if env.is_discrete:
+            if isinstance(old_dist, MultiCategorical):
+                old_dist = old_dist.detached_copy()
+            elif env.is_discrete:
                 old_dist = type(old_dist)(logits=old_dist.logits.detach())
             else:
                 old_dist = type(old_dist)(old_dist.mean.detach(), old_dist.stddev.detach())
@@ -270,7 +282,7 @@ def train_trpo(
             adv_b: torch.Tensor = b_adv,
         ) -> torch.Tensor:
             dist = _get_dist(obs_b, mask_b)
-            lp = dist.log_prob(act_b) if env.is_discrete else dist.log_prob(act_b).sum(-1)
+            lp = dist.log_prob(act_b) if (env.is_discrete or env.action_nvec is not None) else dist.log_prob(act_b).sum(-1)
             return (torch.exp(lp - old_lp_b) * adv_b).mean()
 
         loss_old = _surrogate()
@@ -314,7 +326,7 @@ def train_trpo(
 
         with torch.no_grad():
             d_now = _get_dist(b_obs, b_mask)
-            ent_vec = d_now.entropy() if env.is_discrete else d_now.entropy().sum(-1)
+            ent_vec = d_now.entropy() if (env.is_discrete or env.action_nvec is not None) else d_now.entropy().sum(-1)
             ent_hist.append(float(ent_vec.mean().item()))
 
         for _ in range(cfg.vf_iters):
@@ -357,7 +369,7 @@ def train_trpo(
             "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
             "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
-            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
             **(
                 {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
                 if isinstance(net, ContinuousActorCritic)

@@ -34,7 +34,7 @@ _FRONTIER_SOTA = {"ppo_gru", "hil_serl", "mappo", "maddpg", "dapo", "gspo", "arp
 
 def _get_package_version() -> str:
     pkg = sys.modules.get("wannado.drl")
-    return str(getattr(pkg, "__version__", "1.0.2"))
+    return str(getattr(pkg, "__version__", "1.0.4"))
 
 
 @dataclass
@@ -131,11 +131,32 @@ def get_sota_lineage(
     return entries
 
 
+def _infer_query_context(query: str) -> tuple[str | None, str | None, bool]:
+    """Infer ``(archetype_hint, action_space_hint, is_offline_hint)`` from free-text query."""
+    low = query.lower()
+    if any(k in low for k in ("portfolio", "cvar", "sharpe", "drawdown", "trading", "finance", "asset", "allocation")):
+        return "finance_portfolio_risk", "continuous", False
+    if any(k in low for k in ("clinical", "sepsis", "icu", "patient", "ehr", "medical", "healthcare", "offline", "logged")):
+        return "clinical_offline_safety" if any(k in low for k in ("clinical", "sepsis", "icu", "patient", "ehr", "medical", "healthcare")) else "offline_control", "discrete" if "sepsis" in low or "dose" in low else None, True
+    if any(k in low for k in ("cyber", "intrusion", "firewall", "pentest", "network defense")):
+        return "cyber_attack_defense", "multi_discrete" if "multi" in low else "discrete", False
+    if any(k in low for k in ("multi_agent", "multi-agent", "marl", "pettingzoo", "swarm")):
+        return "multi_agent_coop", "multi_agent_discrete", False
+    if any(k in low for k in ("llm", "reasoning", "sequence", "token", "grpo", "dapo")):
+        return "reasoning_sequence", "autoregressive_sequence", False
+    if any(k in low for k in ("wireless", "ofdm", "sinr", "spectrum", "scheduling")):
+        return "wireless_scheduling", "discrete", False
+    if any(k in low for k in ("robot", "torque", "mujoco", "pendulum", "continuous")):
+        return "continuous_control", "continuous", False
+    return None, None, False
+
+
 def recommend_algo_suite(
     *,
     mdp_spec: MDPSpec | None = None,
     action_space: str = "discrete",
     goal: str = "standard",
+    task_goal: str | None = None,
     partial_observability: bool = False,
     has_invalid_actions: bool = False,
     is_offline_only: bool = False,
@@ -144,6 +165,12 @@ def recommend_algo_suite(
     sim_ms_per_step: float | None = None,
 ) -> RecommendedAlgoSuite:
     """Match MDP constraints & simulator speed to a Baseline -> SOTA algorithm roster."""
+    if task_goal and mdp_spec is None:
+        _arch_q, act_q, off_q = _infer_query_context(task_goal)
+        if act_q is not None and action_space == "discrete":
+            action_space = act_q
+        if off_q and not is_offline_only:
+            is_offline_only = True
     if mdp_spec is not None:
         action_space = mdp_spec.action_spec.kind
         partial_observability = mdp_spec.partial_observability
@@ -203,6 +230,12 @@ def recommend_algo_suite(
         else:
             algos = ["ppo", "ddpg", "td3", "sac"]
             rationale = "Full continuous lineage: PPO vs DDPG -> TD3 -> SAC across multiple random seeds."
+    elif action_space in ("multi_discrete", "multi_binary"):
+        paradigm = "factorized_policy_gradient"
+        algos = ["ppo"] if goal == "sanity" else (["ppo", "a2c"] if goal == "standard" else ["reinforce", "a2c", "trpo", "ppo"])
+        rationale = (
+            "Factorized MultiDiscrete / MultiBinary action spaces use multi-head Categorical policies (`MultiDiscreteActorCritic`) in PPO/A2C/TRPO without combinatorial blow-up."
+        )
     else:
         # Discrete single-agent
         paradigm = "on_policy" if not slow_sim else "off_policy"
@@ -247,6 +280,10 @@ def recommend_algo_suite(
         classic_pool = ["reinforce", "ddpg"]
         workhorse_pool = ["ppo", "td3", "sac"]
         frontier_pool = ["hil_serl", "ppo_gru", "discorl"]
+    elif action_space in ("multi_discrete", "multi_binary"):
+        classic_pool = ["reinforce", "a2c"]
+        workhorse_pool = ["ppo", "trpo"]
+        frontier_pool = ["ppo_gru"]
     else:
         classic_pool = ["monte_carlo", "q_learning", "dqn"]
         workhorse_pool = ["double_dqn", "dueling_dqn", "ppo"]
@@ -727,6 +764,7 @@ def estimate_runtime(
 
 
 def build_interactive_brief(
+    query: str | None = None,
     *,
     project_scan: ProjectScan | None = None,
     mdp_spec: MDPSpec | None = None,
@@ -737,27 +775,46 @@ def build_interactive_brief(
     output_dir: str = "./drl_lab/outputs",
 ) -> dict[str, Any]:
     """Assemble full Stage 0-2 AI Co-Pilot brief (understanding, arsenal, dialogs, knobs, storage & ETA)."""
-    intake = build_mdp_intake_brief(project_scan=project_scan)
+    q_arch, q_act, q_offline = _infer_query_context(query) if query else (None, None, False)
+    intake = build_mdp_intake_brief(project_scan=project_scan, archetype_hint=q_arch)
     action_sp = "discrete"
     if mdp_spec is not None:
         action_sp = mdp_spec.action_spec.kind
     elif preflight_report is not None:
         action_sp = preflight_report.action_space_kind
+    elif q_act is not None:
+        action_sp = q_act
     elif project_scan is not None:
         if project_scan.integration_mode == "multi_agent_env":
             action_sp = "multi_agent_discrete"
         elif project_scan.integration_mode == "reasoning_sequence_task":
             action_sp = "autoregressive_sequence"
-        elif project_scan.likely_archetype == "continuous_control":
+        elif project_scan.inferred_action_space not in ("unknown", "") and project_scan.inferred_action_space is not None:
+            action_sp = project_scan.inferred_action_space
+        elif project_scan.likely_archetype in ("continuous_control", "finance_portfolio_risk"):
             action_sp = "continuous"
+
+    inferred_offline = (
+        mdp_spec.is_offline_only
+        if mdp_spec is not None
+        else bool(
+            q_offline
+            or (
+                project_scan is not None
+                and (
+                    project_scan.integration_mode == "offline_dataset"
+                    or project_scan.likely_archetype == "clinical_offline_safety"
+                )
+            )
+        )
+    )
 
     suite = recommend_algo_suite(
         mdp_spec=mdp_spec,
         action_space=action_sp,
         goal=goal,
-        is_offline_only=(project_scan is not None and project_scan.integration_mode == "offline_dataset")
-        if mdp_spec is None
-        else mdp_spec.is_offline_only,
+        task_goal=query,
+        is_offline_only=inferred_offline,
         sim_ms_per_step=preflight_report.ms_per_step if preflight_report is not None else None,
     )
     param_guide = explain_parameters(
@@ -775,6 +832,14 @@ def build_interactive_brief(
     )
     arsenal = build_arsenal_showcase()
     goal_dialog = build_goal_confirmation_dialog(project_scan)
+    if query:
+        goal_dialog["user_query"] = query
+        if project_scan is None:
+            goal_dialog["ai_understanding_summary"] = (
+                f"Understood request: '{query}'. Framed as `{intake['suggested_archetype']}` "
+                f"({'offline RL' if inferred_offline else action_sp + ' action space'})."
+            )
+            goal_dialog["understanding_confidence"] = "medium"
 
     questions: list[dict[str, Any]] = [
         {

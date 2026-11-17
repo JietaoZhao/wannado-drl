@@ -25,6 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from wannado.drl.core.networks import QNetwork, SquashedGaussianActor, TwinQCritic
+from wannado.drl.core.offline_risk import evaluate_offline_wis
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, hard_update, polyak_update, resolve_device, set_global_seed
 from wannado.drl.core.wrappers import OfflineTransitionDataset, RunningMeanStd
@@ -40,7 +41,7 @@ META = AlgoMeta(
     sample_efficiency="very_high",
     action_spaces=("discrete", "continuous"),
     env_modalities=("offline_rl", "discrete_control", "continuous_control"),
-    supports_action_mask=False,
+    supports_action_mask=True,
     supports_recurrent=False,
     parent_id="sac",
     diff_from_parent="Adds conservative log-sum-exp Q-penalty so static offline datasets never over-estimate unseen OOD actions.",
@@ -128,6 +129,10 @@ def train_cql(
         target_net = QNetwork(dataset.obs_dim, dataset.action_dim, cfg.hidden_dims).to(dev)
         hard_update(q_net, target_net)
         opt = torch.optim.Adam(q_net.parameters(), lr=cfg.lr)
+        masks_raw = dataset.extra.get("action_masks")
+        next_masks_raw = dataset.extra.get("next_action_masks", masks_raw)
+        masks_all = np.asarray(masks_raw, dtype=np.bool_) if masks_raw is not None else None
+        next_masks_all = np.asarray(next_masks_raw, dtype=np.bool_) if next_masks_raw is not None else None
 
         for step in range(1, cfg.num_grad_steps + 1):
             idx = rng.integers(0, n_data, size=cfg.batch_size)
@@ -138,12 +143,23 @@ def train_cql(
             b_term = torch.as_tensor(dataset.terminateds[idx], device=dev, dtype=torch.float32)
 
             with torch.no_grad():
-                td_target = b_rew + cfg.gamma * (1.0 - b_term) * target_net(b_next).max(dim=1).values
+                q_next_all = target_net(b_next)
+                if next_masks_all is not None:
+                    b_nmask = torch.as_tensor(next_masks_all[idx], device=dev, dtype=torch.bool)
+                    has_valid = b_nmask.any(dim=1, keepdim=True)
+                    safe_mask = torch.where(has_valid, b_nmask, torch.ones_like(b_nmask))
+                    q_next_all = q_next_all.masked_fill(~safe_mask, -1e9)
+                td_target = b_rew + cfg.gamma * (1.0 - b_term) * q_next_all.max(dim=1).values
             q_all = q_net(b_obs)
             q_data = q_all.gather(1, b_act.unsqueeze(1)).squeeze(1)
             td_loss = F.mse_loss(q_data, td_target)
-            # [AI-Prompt Hook]: Discrete CQL log-sum-exp OOD penalty.
-            cql_pen = (torch.logsumexp(q_all, dim=1) - q_data).mean()
+            # [AI-Prompt Hook]: Discrete CQL log-sum-exp OOD penalty (respecting feasibility masks when supplied).
+            q_for_lse = q_all
+            if masks_all is not None:
+                b_mask = torch.as_tensor(masks_all[idx], device=dev, dtype=torch.bool)
+                b_mask = b_mask.scatter(1, b_act.unsqueeze(1), True)
+                q_for_lse = q_for_lse.masked_fill(~b_mask, -1e9)
+            cql_pen = (torch.logsumexp(q_for_lse, dim=1) - q_data).mean()
             loss = td_loss + cfg.cql_alpha * cql_pen
 
             opt.zero_grad()
@@ -159,10 +175,16 @@ def train_cql(
 
         model_obj: Any = q_net
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
+        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(q_net), torch.no_grad():
-                return int(torch.argmax(q_net(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0))).item())
+                q_vals = q_net(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0)
+                mask = (info_in or {}).get("action_mask")
+                if mask is not None:
+                    m_t = torch.as_tensor(mask, device=dev, dtype=torch.bool).view_as(q_vals)
+                    if bool(m_t.any()):
+                        q_vals = q_vals.masked_fill(~m_t, -1e9)
+                return int(torch.argmax(q_vals).item())
 
     else:
         act_low = dataset.action_low if dataset.action_low is not None else -np.ones(dataset.action_dim, dtype=np.float32)
@@ -225,7 +247,8 @@ def train_cql(
 
         model_obj = {"actor": actor, "critic": critic}
 
-        def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> Any:
+        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
+            _ = info_in
             o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
             with eval_mode(actor), torch.no_grad():
                 a_t, _ = actor.get_action(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0), deterministic=True)
@@ -234,6 +257,11 @@ def train_cql(
     eval_stats = (
         evaluate_policy_episodes(eval_env_or_factory, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
         if eval_env_or_factory is not None
+        else None
+    )
+    ope_stats = (
+        evaluate_offline_wis(dataset, policy_fn, gamma=cfg.gamma)
+        if eval_stats is None
         else None
     )
 
@@ -250,6 +278,16 @@ def train_cql(
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
             "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
             "mean_cql_ood_gap": float(np.mean(cql_gap_hist)) if cql_gap_hist else 0.0,
+            "is_continuous": 0.0 if dataset.is_discrete else 1.0,
+            **(
+                {
+                    "ope_wis_return": float(ope_stats["wis_return"]),
+                    "ope_behavior_return": float(ope_stats["behavior_return"]),
+                    "ope_effective_sample_size": float(ope_stats["effective_sample_size"]),
+                }
+                if ope_stats is not None
+                else {}
+            ),
         },
         eval_stats=eval_stats,
         obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,

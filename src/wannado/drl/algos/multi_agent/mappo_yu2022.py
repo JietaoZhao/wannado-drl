@@ -102,7 +102,13 @@ class MAPPOConfig:
 
 def _stack_local_obs(obs_dict: dict[str, np.ndarray], agents: list[str]) -> np.ndarray:
     eye = np.eye(len(agents), dtype=np.float32)
-    return np.stack([np.concatenate([obs_dict[a], eye[i]]) for i, a in enumerate(agents)], axis=0)
+    vecs = [np.asarray(obs_dict[a], dtype=np.float32).reshape(-1) for a in agents]
+    target_dim = max((v.shape[0] for v in vecs), default=0)
+    padded = [
+        np.pad(v, (0, target_dim - v.shape[0]), mode="constant") if v.shape[0] < target_dim else v
+        for v in vecs
+    ]
+    return np.stack([np.concatenate([padded[i], eye[i]]) for i in range(len(agents))], axis=0)
 
 
 def train_mappo(

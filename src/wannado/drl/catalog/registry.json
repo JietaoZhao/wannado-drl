@@ -764,7 +764,7 @@
         "discrete_control",
         "continuous_control"
       ],
-      "supports_action_mask": false,
+      "supports_action_mask": true,
       "supports_recurrent": false,
       "parent_id": "sac",
       "diff_from_parent": "Adds conservative log-sum-exp Q-penalty so static offline datasets never over-estimate unseen OOD actions.",
@@ -831,7 +831,7 @@
         "discrete_control",
         "continuous_control"
       ],
-      "supports_action_mask": false,
+      "supports_action_mask": true,
       "supports_recurrent": false,
       "parent_id": "cql",
       "diff_from_parent": "Replaces OOD action penalization with in-sample expectile V(s) regression + Advantage-Weighted Regression (AWR).",

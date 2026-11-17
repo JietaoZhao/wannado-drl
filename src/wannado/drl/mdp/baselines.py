@@ -145,6 +145,8 @@ def evaluate_random_baseline(
                 if valid.size > 0:
                     return int(rng.choice(valid))
             return int(rng.integers(0, env.action_dim))
+        if env.action_nvec is not None:
+            return np.asarray([int(rng.integers(0, k)) for k in env.action_nvec], dtype=np.int64)
         low_raw = env.action_low if env.action_low is not None else np.full(env.action_dim, -1.0, dtype=np.float32)
         high_raw = env.action_high if env.action_high is not None else np.full(env.action_dim, 1.0, dtype=np.float32)
         low = np.where(np.isfinite(low_raw), low_raw, -1.0)

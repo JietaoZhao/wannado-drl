@@ -25,7 +25,7 @@ import torch
 import torch.nn.functional as F
 
 from wannado.drl.core.buffers import RolloutBuffer
-from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic
+from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic, MultiDiscreteActorCritic
 from wannado.drl.core.provenance import resolve_run_optimizations
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, explained_variance, resolve_device, set_global_seed
@@ -116,11 +116,15 @@ def train_ppo(
     dev = resolve_device(cfg.device)
     env = ensure_gym_env(env_or_factory)
 
-    net: DiscreteActorCritic | ContinuousActorCritic
+    net: DiscreteActorCritic | MultiDiscreteActorCritic | ContinuousActorCritic
     act_dtype: np.dtype[Any]
     if env.is_discrete:
         net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
         act_shape: tuple[int, ...] = ()
+        act_dtype = np.dtype(np.int64)
+    elif env.action_nvec is not None:
+        net = MultiDiscreteActorCritic(env.obs_dim, env.action_nvec, hidden_dims=cfg.hidden_dims).to(dev)
+        act_shape = (len(env.action_nvec),)
         act_dtype = np.dtype(np.int64)
     else:
         net = ContinuousActorCritic(
@@ -300,7 +304,7 @@ def train_ppo(
             "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
             "mean_approx_kl": float(np.mean(kl_hist)) if kl_hist else 0.0,
             "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
-            "is_continuous": 0.0 if env.is_discrete else 1.0,
+            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
             **(
                 {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
                 if isinstance(net, ContinuousActorCritic)

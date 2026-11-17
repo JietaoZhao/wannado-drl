@@ -269,6 +269,111 @@ def build_mdp_archetype(
             is_offline_only=True,
         )
 
+    if key in ("finance_portfolio_risk", "finance", "portfolio"):
+        return MDPSpec(
+            problem_name=problem_name or "FinancePortfolioRiskControl",
+            domain="finance",
+            goal_plain="Dynamically rebalance asset weights on the probability simplex maximizing risk-adjusted return (Sharpe/CVaR) net of transaction costs.",
+            decision_interval_plain="One trading bar / rebalancing period (daily or intraday).",
+            suitability=diagnose_rl_suitability(has_sequential_coupling=True),
+            state_features=[
+                StateFeatureSpec("lagged_returns_and_vol", dim=12, scale_hint="strictly causal rolling window"),
+                StateFeatureSpec("current_portfolio_weights", dim=4, scale_hint="simplex in [0, 1], sum == 1"),
+            ],
+            partial_observability=True,
+            action_spec=ActionSpaceSpec(
+                kind="continuous",
+                dim=4,
+                bounds=(-1.0, 1.0),
+                safety_projection="apply_simplex_projection / PortfolioSimplexWrapper (w >= 0, sum == 1)",
+                notes="Wrap continuous Box actions via PortfolioSimplexWrapper so weights always sum to 1.",
+            ),
+            reward_terms=[
+                RewardTermSpec("net_portfolio_log_return", "primary_objective", 1.0, (-0.1, 0.1), "Compare out-of-sample walk-forward wealth"),
+                RewardTermSpec("turnover_and_cvar_penalty", "safety_penalty", -0.2, (-0.5, 0.0), "Control drawdown tail risk (CVaR) and slippage"),
+            ],
+            termination_spec=TerminationSpec(["margin_ruin_or_end_of_window"], truncated_horizon=252, bootstrap_on_truncated=True),
+            task_kpis=["sharpe_ratio", "cvar_alpha", "max_drawdown", "portfolio_turnover"],
+            reward_hacking_risks=[
+                "Look-ahead price leakage or survivorship bias inflating backtest Sharpe",
+                "Zero-turnover hold bias or excessive churn if transaction fees are omitted",
+            ],
+            future_leakage_checklist=[
+                "Ensure features[t] use ONLY prices/indicators available before market close[t]",
+                "Separate train/validation/test chronologically (never shuffle overlapping windows)",
+            ],
+            heuristic_baseline_idea="Equal-Weight (1/N) or Volatility-Parity Rebalancing",
+            gamma=0.99,
+        )
+
+    if key in ("clinical_offline_safety", "clinical", "healthcare", "sepsis"):
+        return MDPSpec(
+            problem_name=problem_name or "ClinicalOfflineTreatmentSafety",
+            domain="healthcare",
+            goal_plain="Learn conservative discrete dosing/intervention policies from logged EHR trajectories with strict action masking and Off-Policy Evaluation (WIS/FQE).",
+            decision_interval_plain="One clinical chart window / ICU step (e.g., 4 hours).",
+            suitability=diagnose_rl_suitability(has_sequential_coupling=True, online_interaction_allowed=False),
+            state_features=[
+                StateFeatureSpec("patient_vitals_and_labs", dim=16, scale_hint="train-split standardized, missingness flags"),
+                StateFeatureSpec("prior_treatment_history", dim=4, scale_hint="causal cumulative doses"),
+            ],
+            partial_observability=True,
+            action_spec=ActionSpaceSpec(
+                kind="discrete",
+                dim=25,
+                has_invalid_actions=True,
+                safety_projection="action_mask over clinically contraindicated doses",
+                notes="Attach `action_masks` and `next_action_masks` to `OfflineTransitionDataset.extra`.",
+            ),
+            reward_terms=[
+                RewardTermSpec("survival_and_sofa_recovery", "primary_objective", 1.0, (-15.0, 15.0), "Audit alongside subgroup WIS/FQE"),
+                RewardTermSpec("organ_toxicity_penalty", "safety_penalty", -0.5, (-5.0, 0.0), "Verify no excessive high-dose recommendations"),
+            ],
+            termination_spec=TerminationSpec(["icu_discharge_or_mortality"], truncated_horizon=48, bootstrap_on_truncated=True),
+            task_kpis=["wis_return", "fqe_initial_value", "subgroup_cvar_05", "clinician_agreement_rate"],
+            reward_hacking_risks=[
+                "Confounding-by-indication or immortal-time bias causing OPE over-optimism",
+                "Recommending rare unlogged extreme doses without CQL pessimism or action masks",
+            ],
+            future_leakage_checklist=[
+                "Verify lab measurements carry timestamps <= decision step t (no retrospective discharge codes)",
+                "Log `behavior_probs` and `group_labels` for WIS and demographic subgroup auditing",
+            ],
+            heuristic_baseline_idea="Clinician Logged Behavior Policy (BC / empirical mode)",
+            gamma=0.99,
+            is_offline_only=True,
+        )
+
+    if key in ("cyber_attack_defense", "cyber", "cybersecurity"):
+        return MDPSpec(
+            problem_name=problem_name or "CyberDefenseIntrusionResponse",
+            domain="cybersecurity",
+            goal_plain="Detect, isolate, and patch compromised network nodes over discrete/multi-discrete defense actions while keeping benign service availability high.",
+            decision_interval_plain="One network monitoring / SOC incident response tick.",
+            suitability=diagnose_rl_suitability(has_sequential_coupling=True),
+            state_features=[
+                StateFeatureSpec("host_compromise_alerts", dim=12, scale_hint="[0, 1] normalized IDS telemetry"),
+                StateFeatureSpec("service_health_vector", dim=6, scale_hint="availability indicators"),
+            ],
+            partial_observability=True,
+            action_spec=ActionSpaceSpec(
+                kind="multi_discrete",
+                dim=8,
+                has_invalid_actions=True,
+                safety_projection="action_mask over unreachable hosts or illegal isolation targets",
+            ),
+            reward_terms=[
+                RewardTermSpec("service_uptime_and_containment", "primary_objective", 1.0, (-2.0, 2.0)),
+                RewardTermSpec("false_positive_isolation_cost", "safety_penalty", -0.3, (-1.0, 0.0)),
+            ],
+            termination_spec=TerminationSpec(["crown_jewel_breach_or_mitigated"], truncated_horizon=100, bootstrap_on_truncated=True),
+            task_kpis=["containment_rate", "mean_service_availability", "false_isolation_rate"],
+            reward_hacking_risks=["Shutting down all hosts immediately to prevent lateral movement (kills service availability)"],
+            future_leakage_checklist=["State alerts must come from causal IDS observations, not attacker ground truth state"],
+            heuristic_baseline_idea="Rule-based IDS alert quarantine threshold",
+            gamma=0.95,
+        )
+
     # Default custom_sim / discrete_control
     return MDPSpec(
         problem_name=problem_name or "CustomDecisionEnvironment",
