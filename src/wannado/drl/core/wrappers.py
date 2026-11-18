@@ -444,22 +444,22 @@ class UniversalGymAdapter(gym.Env):
             if np.ndim(action) == 0:
                 joint_card = max(1, int(math.prod(self.action_nvec)))
                 idx = int(np.asarray(action).item()) % joint_card
-                arr = np.asarray(np.unravel_index(idx, self.action_nvec), dtype=np.int64)
+                disc_arr: np.ndarray = np.asarray(np.unravel_index(idx, self.action_nvec), dtype=np.int64)
             else:
-                arr = np.asarray(action, dtype=np.int64).reshape(-1)
+                flat_arr = np.asarray(action, dtype=np.int64).reshape(-1)
                 bounds = np.asarray(self.action_nvec, dtype=np.int64)
-                arr = np.clip(arr, 0, bounds - 1)
+                disc_arr = np.clip(flat_arr, 0, bounds - 1)
             if self._raw_action_shape:
-                arr = arr.reshape(self._raw_action_shape)
-            return arr.astype(np.int8 if self.raw_action_kind == "multi_binary" else np.int64)
-        arr = np.asarray(action, dtype=np.float32)
-        if isinstance(self.action_space, spaces.Box) and arr.shape != self.action_space.shape:
-            arr = arr.reshape(self.action_space.shape)
+                disc_arr = np.reshape(disc_arr, self._raw_action_shape)
+            return disc_arr.astype(np.int8 if self.raw_action_kind == "multi_binary" else np.int64)
+        cont_arr: np.ndarray = np.asarray(action, dtype=np.float32)
+        if isinstance(self.action_space, spaces.Box) and cont_arr.shape != self.action_space.shape:
+            cont_arr = np.reshape(cont_arr, self.action_space.shape)
         if self.action_low is not None and self.action_high is not None:
-            low = self.action_low.reshape(arr.shape)
-            high = self.action_high.reshape(arr.shape)
-            arr = np.clip(arr, low, high)
-        return arr
+            low = self.action_low.reshape(cont_arr.shape)
+            high = self.action_high.reshape(cont_arr.shape)
+            cont_arr = np.clip(cont_arr, low, high)
+        return cont_arr
 
     def reset(
         self,
@@ -813,7 +813,7 @@ class OfflineTransitionDataset:
             is_discrete = bool(np.issubdtype(act_raw.dtype, np.integer) and act_raw.ndim == 1)
         if is_discrete:
             act_arr = act_raw.reshape(-1).astype(np.int64)
-            inferred_dim = int(act_arr.max()) + 1 if act_arr.size else 2
+            inferred_dim = int(np.max(act_arr)) + 1 if act_arr.size else 2
             if action_masks is not None:
                 inferred_dim = max(inferred_dim, int(np.asarray(action_masks).shape[-1]))
             dim = int(action_dim) if action_dim is not None else max(2, inferred_dim)
