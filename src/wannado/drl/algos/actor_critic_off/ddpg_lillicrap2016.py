@@ -15,20 +15,17 @@ Original single-file modular implementation for wannado-drl.
 
 from __future__ import annotations
 
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
 import numpy as np
 import torch
 import torch.nn.functional as F
 
-from wannado.drl.core.buffers import ReplayBuffer
-from wannado.drl.core.networks import DeterministicActor, build_mlp
+from wannado.drl.core.algo_helpers import OnlineRunContext, run_offpolicy_continuous_loop
+from wannado.drl.core.networks import DeterministicActor, SingleQCritic
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, hard_update, polyak_update, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
+from wannado.drl.core.utils import hard_update, polyak_update
 
 META = AlgoMeta(
     id="ddpg",
@@ -89,10 +86,25 @@ class DDPGConfig:
     tau: float = 0.005
     buffer_size: int = 50_000
     batch_size: int = 64
+    train_freq: int = 1
+    gradient_steps: int = 0
     exploration_noise: float = 0.15
     hidden_dims: tuple[int, ...] = (128, 128)
+    num_envs: int = 1
+    vec_mode: str = "auto"
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
     normalize_obs: bool = False
+    normalize_reward: bool = False
     eval_episodes: int = 10
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    save_replay_buffer: bool = False
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     device: str = "auto"
     seed: int = 42
 
@@ -105,109 +117,139 @@ def train_ddpg(
 ) -> TrainResult:
     """Train DDPG on continuous Box-action environments."""
     cfg = config or DDPGConfig()
-    rng = set_global_seed(cfg.seed)
-    dev = resolve_device(cfg.device)
-    env = ensure_gym_env(env_or_factory)
-    if env.is_discrete or env.action_low is None or env.action_high is None:
-        raise ValueError("ddpg requires bounded continuous Box action spaces.")
-
-    actor = DeterministicActor(env.obs_dim, env.action_dim, env.action_low, env.action_high, cfg.hidden_dims).to(dev)
-    target_actor = DeterministicActor(env.obs_dim, env.action_dim, env.action_low, env.action_high, cfg.hidden_dims).to(dev)
-    hard_update(actor, target_actor)
-
-    critic = build_mlp(env.obs_dim + env.action_dim, cfg.hidden_dims, 1, activation=torch.nn.ReLU).to(dev)
-    target_critic = build_mlp(env.obs_dim + env.action_dim, cfg.hidden_dims, 1, activation=torch.nn.ReLU).to(dev)
-    hard_update(critic, target_critic)
-
-    actor_opt = torch.optim.Adam(actor.parameters(), lr=cfg.actor_lr)
-    critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
-    replay = ReplayBuffer(cfg.buffer_size, env.obs_dim, env.action_dim, discrete_action=False, device=dev)
-    obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
-
-    act_scale = (env.action_high - env.action_low) / 2.0
-    t0 = time.perf_counter()
-    obs, _ = env.reset(seed=cfg.seed)
-    ep_ret, ep_idx = 0.0, 0
-    learning_curve: list[dict[str, float]] = []
+    state: dict[str, Any] = {}
     q_hist: list[float] = []
 
-    for step in range(1, cfg.total_timesteps + 1):
-        if obs_rms is not None:
-            obs_rms.update(obs)
-            obs_proc = obs_rms.normalize(obs)
-        else:
-            obs_proc = obs
+    def _build(
+        ctx: OnlineRunContext, dev: torch.device
+    ) -> tuple[Any, Any, str, dict[str, Any], dict[str, Any], dict[str, torch.optim.Optimizer]]:
+        env = ctx.env
+        assert env.action_low is not None and env.action_high is not None
+        actor = DeterministicActor(
+            env.obs_spec,
+            env.action_dim,
+            env.action_low,
+            env.action_high,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        target_actor = DeterministicActor(
+            env.obs_spec,
+            env.action_dim,
+            env.action_low,
+            env.action_high,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        hard_update(actor, target_actor)
 
-        if step < cfg.learning_starts:
-            act = rng.uniform(env.action_low, env.action_high).astype(np.float32)
-        else:
-            with torch.no_grad():
-                raw = actor(torch.as_tensor(obs_proc, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0).cpu().numpy()
-            noise = rng.normal(0.0, cfg.exploration_noise * act_scale, size=env.action_dim).astype(np.float32)
-            act = np.clip(raw + noise, env.action_low, env.action_high).astype(np.float32)
+        critic = SingleQCritic(
+            env.obs_spec,
+            env.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        target_critic = SingleQCritic(
+            env.obs_spec,
+            env.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        hard_update(critic, target_critic)
 
-        next_obs, reward, term, trunc, _ = env.step(act)
-        ep_ret += float(reward)
-        next_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
-        replay.add(obs_proc, act, float(reward), next_proc, bool(term))
+        actor_opt = torch.optim.Adam(actor.parameters(), lr=cfg.actor_lr)
+        critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
+        act_scale = (env.action_high - env.action_low) / 2.0
 
-        if term or trunc:
-            ep_idx += 1
-            if ep_idx % 5 == 0 or step == cfg.total_timesteps:
-                learning_curve.append({"step": float(step), "episode_return": float(ep_ret)})
-            obs, _ = env.reset(seed=cfg.seed + ep_idx)
-            ep_ret = 0.0
-        else:
-            obs = next_obs
+        state.update(
+            {
+                "actor": actor,
+                "target_actor": target_actor,
+                "critic": critic,
+                "target_critic": target_critic,
+                "actor_opt": actor_opt,
+                "critic_opt": critic_opt,
+                "act_scale": act_scale,
+            }
+        )
+        policy_spec = {
+            "net_class": "DeterministicActor",
+            "init_kwargs": {
+                "action_dim": int(env.action_dim),
+                "action_low": env.action_low.tolist(),
+                "action_high": env.action_high.tolist(),
+                "hidden_dims": list(cfg.hidden_dims),
+                "extractor_type": cfg.extractor_type,
+                "extractor_kwargs": cfg.extractor_kwargs,
+            },
+        }
+        models_map = {
+            "actor": actor,
+            "target_actor": target_actor,
+            "critic": critic,
+            "target_critic": target_critic,
+        }
+        opts_map: dict[str, torch.optim.Optimizer] = {"actor": actor_opt, "critic": critic_opt}
+        return actor, {"actor": actor, "critic": critic}, "deterministic_actor", policy_spec, models_map, opts_map
 
-        if step >= cfg.learning_starts and replay.size >= cfg.batch_size:
-            b_obs, b_act, b_rew, b_next, b_term = replay.sample(cfg.batch_size, rng=rng)
-            # [AI-Prompt Hook]: Single Q-target; replace with Twin Clipped Double-Q in `td3`.
-            with torch.no_grad():
-                next_a = target_actor(b_next)
-                next_q = target_critic(torch.cat([b_next, next_a], dim=-1)).squeeze(-1)
-                td_target = b_rew + cfg.gamma * (1.0 - b_term) * next_q
+    def _sample(actor: Any, obs_t: Any, env: Any, rng: np.random.Generator) -> np.ndarray:
+        raw = actor(obs_t).cpu().numpy()
+        noise = rng.normal(0.0, cfg.exploration_noise * state["act_scale"], size=raw.shape).astype(np.float32)
+        return np.clip(raw + noise, env.action_low, env.action_high).astype(np.float32)
 
-            q_pred = critic(torch.cat([b_obs, b_act], dim=-1)).squeeze(-1)
-            critic_loss = F.mse_loss(q_pred, td_target)
-            critic_opt.zero_grad()
-            critic_loss.backward()
-            critic_opt.step()
-            q_hist.append(float(q_pred.mean().item()))
+    def _update(
+        _update_step: int,
+        b_obs: Any,
+        b_act: torch.Tensor,
+        b_rew: torch.Tensor,
+        b_next: Any,
+        b_term: torch.Tensor,
+    ) -> None:
+        actor = state["actor"]
+        target_actor = state["target_actor"]
+        critic = state["critic"]
+        target_critic = state["target_critic"]
+        actor_opt = state["actor_opt"]
+        critic_opt = state["critic_opt"]
 
-            actor_loss = -critic(torch.cat([b_obs, actor(b_obs)], dim=-1)).mean()
-            actor_opt.zero_grad()
-            actor_loss.backward()
-            actor_opt.step()
+        # [AI-Prompt Hook]: Single Q-target; replace with Twin Clipped Double-Q in `td3`.
+        with torch.no_grad():
+            next_a = target_actor(b_next)
+            next_q = target_critic(b_next, next_a).squeeze(-1)
+            td_target = b_rew + cfg.gamma * (1.0 - b_term) * next_q
 
-            polyak_update(actor, target_actor, cfg.tau)
-            polyak_update(critic, target_critic, cfg.tau)
+        q_pred = critic(b_obs, b_act).squeeze(-1)
+        critic_loss = F.mse_loss(q_pred, td_target)
+        critic_opt.zero_grad()
+        critic_loss.backward()
+        critic_opt.step()
+        q_hist.append(float(q_pred.mean().item()))
 
-    if obs_rms is not None:
-        obs_rms.freeze(True)
+        actor_loss = -critic(b_obs, actor(b_obs)).mean()
+        actor_opt.zero_grad()
+        actor_loss.backward()
+        actor_opt.step()
 
-    def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> np.ndarray:
-        o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-        with eval_mode(actor), torch.no_grad():
-            return actor(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0).cpu().numpy()
+        polyak_update(actor, target_actor, cfg.tau)
+        polyak_update(critic, target_critic, cfg.tau)
 
-    eval_target = eval_env_or_factory if eval_env_or_factory is not None else env
-    eval_stats = evaluate_policy_episodes(eval_target, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-
-    return TrainResult(
-        algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=cfg.total_timesteps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model={"actor": actor, "critic": critic},
-        config=asdict(cfg),
-        learning_curve=learning_curve,
-        train_diagnostics={
+    def _diag() -> dict[str, Any]:
+        return {
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
             "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
-        },
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,
+        }
+
+    return run_offpolicy_continuous_loop(
+        env_or_factory,
+        algo_id=META.id,
+        cfg=cfg,
+        eval_env_or_factory=eval_env_or_factory,
+        build_models_fn=_build,
+        sample_action_fn=_sample,
+        update_fn=_update,
+        diagnostics_fn=_diag,
     )

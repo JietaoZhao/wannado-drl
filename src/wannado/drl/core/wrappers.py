@@ -11,6 +11,15 @@ import gymnasium as gym
 import numpy as np
 from gymnasium import spaces
 
+from wannado.drl.core.obs_spec import (
+    ObsSpec,
+    format_obs_batch,
+    format_obs_single,
+    infer_obs_spec,
+    slice_obs,
+    vector_obs_spec,
+)
+
 
 class RunningMeanStd:
     """Welford running mean and variance tracker with explicit eval-freeze guard."""
@@ -62,6 +71,107 @@ class RunningMeanStd:
         self.var = np.asarray(state["var"], dtype=np.float64)
         self.count = float(state["count"])
         self.frozen = bool(state.get("frozen", True))
+
+
+class DictRunningMeanStd:
+    """Selective RunningMeanStd normalizing continuous vector/entity leaves while leaving images untouched."""
+
+    def __init__(self, obs_spec: ObsSpec, clip: float = 10.0) -> None:
+        self.obs_spec = obs_spec
+        self.clip = float(clip)
+        self.frozen = False
+        self.leaves: dict[str, RunningMeanStd] = {}
+        self.single: RunningMeanStd | None = None
+
+        if obs_spec.kind == "dict":
+            mask_keys = {lf.mask_key for lf in obs_spec.leaves.values() if lf.mask_key is not None}
+            for k, lf in obs_spec.leaves.items():
+                if k in mask_keys or lf.kind == "image" or lf.normalize_pixel:
+                    continue
+                self.leaves[k] = RunningMeanStd(lf.shape)
+        elif obs_spec.kind != "image" and not obs_spec.normalize_pixel:
+            self.single = RunningMeanStd(obs_spec.shape)
+
+    def freeze(self, flag: bool = True) -> None:
+        self.frozen = bool(flag)
+        if self.single is not None:
+            self.single.freeze(flag)
+        for sub in self.leaves.values():
+            sub.freeze(flag)
+
+    def update(self, obs: Any) -> None:
+        if self.frozen:
+            return
+        if self.single is not None and not isinstance(obs, dict):
+            self.single.update(obs)
+            return
+        if isinstance(obs, dict):
+            for k, sub in self.leaves.items():
+                if k in obs:
+                    sub.update(obs[k])
+
+    def normalize(self, obs: Any) -> Any:
+        if self.single is not None and not isinstance(obs, dict):
+            return self.single.normalize(obs, clip=self.clip)
+        if isinstance(obs, dict):
+            out: dict[str, Any] = {}
+            for k, v in obs.items():
+                if k in self.leaves:
+                    out[k] = self.leaves[k].normalize(v, clip=self.clip)
+                else:
+                    out[k] = v
+            return out
+        return obs
+
+    def state_dict(self) -> dict[str, Any]:
+        if self.single is not None:
+            sd = self.single.state_dict()
+            sd["frozen"] = self.frozen
+            return sd
+        return {
+            "is_dict": True,
+            "frozen": self.frozen,
+            "leaves": {k: sub.state_dict() for k, sub in self.leaves.items()},
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        self.frozen = bool(state.get("frozen", True))
+        if self.single is not None and "mean" in state:
+            self.single.load_state_dict(state)
+            return
+        leaf_states = state.get("leaves", {})
+        for k, sub in self.leaves.items():
+            if k in leaf_states:
+                sub.load_state_dict(leaf_states[k])
+
+
+class RewardNormalizer:
+    """Discounted return variance scaler for training stability (strictly bypassed during eval)."""
+
+    def __init__(self, num_envs: int = 1, gamma: float = 0.99, clip: float = 10.0) -> None:
+        self.num_envs = max(1, int(num_envs))
+        self.gamma = float(gamma)
+        self.clip = float(clip)
+        self.returns = np.zeros((self.num_envs,), dtype=np.float64)
+        self.ret_rms = RunningMeanStd(())
+
+    def normalize_batch(self, rewards: np.ndarray, dones: np.ndarray) -> np.ndarray:
+        rew_arr = np.asarray(rewards, dtype=np.float64).reshape(self.num_envs)
+        done_arr = np.asarray(dones, dtype=np.bool_).reshape(self.num_envs)
+        self.returns = self.returns * self.gamma * (~done_arr) + rew_arr
+        self.ret_rms.update(self.returns)
+        scale = float(np.sqrt(float(self.ret_rms.var) + 1e-8))
+        normed = np.clip(rew_arr / scale, -self.clip, self.clip)
+        return normed.astype(np.float32)
+
+    def state_dict(self) -> dict[str, Any]:
+        return {"returns": self.returns.tolist(), "ret_rms": self.ret_rms.state_dict(), "gamma": self.gamma}
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if "returns" in state:
+            self.returns = np.asarray(state["returns"], dtype=np.float64)
+        if "ret_rms" in state:
+            self.ret_rms.load_state_dict(state["ret_rms"])
 
 
 def _is_dict_space(space: Any) -> bool:
@@ -278,16 +388,24 @@ class UniversalGymAdapter(gym.Env):
         max_episode_steps: int | None = None,
         action_mask_fn: Callable[[Any, dict[str, Any]], np.ndarray] | None = None,
         heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
+        structured_obs: bool = False,
+        extractor_type: str = "auto",
     ) -> None:
         super().__init__()
-        self.raw_env = (
-            raw_env_or_factory()
-            if callable(raw_env_or_factory) and (isinstance(raw_env_or_factory, type) or not hasattr(raw_env_or_factory, "step"))
-            else raw_env_or_factory
-        )
+        self.raw_env: Any
+        if isinstance(raw_env_or_factory, str):
+            self.raw_env = gym.make(raw_env_or_factory)
+        else:
+            self.raw_env = (
+                raw_env_or_factory()
+                if callable(raw_env_or_factory) and (isinstance(raw_env_or_factory, type) or not hasattr(raw_env_or_factory, "step"))
+                else raw_env_or_factory
+            )
         self._max_episode_steps = max_episode_steps
         self._action_mask_fn = action_mask_fn
         self.heuristic_fn = heuristic_fn
+        self.structured_obs = bool(structured_obs)
+        self.extractor_type = str(extractor_type)
         self._step_counter = 0
 
         self.is_vector_env = bool(
@@ -320,16 +438,42 @@ class UniversalGymAdapter(gym.Env):
             self._initial_obs = _extract_reset_obs(self.raw_env.reset())
 
         self._raw_obs_space = raw_obs_space
+        self.obs_spec = infer_obs_spec(raw_obs_space, self._initial_obs, extractor_type=self.extractor_type)
         try:
             self.obs_dim = _infer_flat_obs_dim(raw_obs_space, self._initial_obs)
         except Exception:  # noqa: BLE001 — fall back to initial reset observation when space metadata lacks shape
             if self._initial_obs is None:
                 self._initial_obs = _extract_reset_obs(self.raw_env.reset())
             self.obs_dim = _infer_flat_obs_dim(raw_obs_space, self._initial_obs)
+            self.obs_spec = infer_obs_spec(raw_obs_space, self._initial_obs, extractor_type=self.extractor_type)
 
-        self.observation_space = spaces.Box(
-            low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
-        )
+        if self.structured_obs and self.obs_spec.kind == "image":
+            self.observation_space: spaces.Space[Any] = spaces.Box(
+                low=0.0,
+                high=255.0 if self.obs_spec.dtype == "uint8" else np.inf,
+                shape=self.obs_spec.shape,
+                dtype=np.uint8 if self.obs_spec.dtype == "uint8" else np.float32,
+            )
+        elif self.structured_obs and self.obs_spec.kind == "entities":
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=self.obs_spec.shape, dtype=np.float32
+            )
+        elif self.structured_obs and self.obs_spec.kind == "dict":
+            self.observation_space = spaces.Dict(
+                {
+                    k: spaces.Box(
+                        low=0.0 if lf.dtype == "uint8" else -np.inf,
+                        high=255.0 if lf.dtype == "uint8" else np.inf,
+                        shape=lf.shape,
+                        dtype=np.uint8 if lf.dtype == "uint8" else np.float32,
+                    )
+                    for k, lf in self.obs_spec.leaves.items()
+                }
+            )
+        else:
+            self.observation_space = spaces.Box(
+                low=-np.inf, high=np.inf, shape=(self.obs_dim,), dtype=np.float32
+            )
 
         # Normalize legacy gym, MultiDiscrete, MultiBinary, dm_env, and Gymnasium action spaces
         self.action_space = self._coerce_action_space(raw_act_space)
@@ -461,12 +605,17 @@ class UniversalGymAdapter(gym.Env):
             cont_arr = np.clip(cont_arr, low, high)
         return cont_arr
 
+    def format_obs(self, raw_obs: Any) -> Any:
+        if self.structured_obs:
+            return format_obs_single(raw_obs, self.obs_spec)
+        return _flatten_obs(raw_obs, self._raw_obs_space)
+
     def reset(
         self,
         *,
         seed: int | None = None,
         options: dict[str, Any] | None = None,
-    ) -> tuple[np.ndarray, dict[str, Any]]:
+    ) -> tuple[Any, dict[str, Any]]:
         self._step_counter = 0
         try:
             if options is not None:
@@ -490,16 +639,16 @@ class UniversalGymAdapter(gym.Env):
         if self.is_vector_env:
             raw_obs = _extract_vec_slot(raw_obs, 0)
 
-        obs_vec = _flatten_obs(raw_obs, self._raw_obs_space)
+        obs_out = self.format_obs(raw_obs)
         if self.is_discrete:
             mask = (
-                self._action_mask_fn(obs_vec, info)
+                self._action_mask_fn(obs_out, info)
                 if self._action_mask_fn is not None
                 else _extract_action_mask(self.raw_env, info, self.action_dim)
             )
             if mask is not None:
                 info["action_mask"] = np.asarray(mask, dtype=np.bool_)
-        return obs_vec, info
+        return obs_out, info
 
     def step(self, action: Any) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
         self._step_counter += 1
@@ -565,20 +714,16 @@ class UniversalGymAdapter(gym.Env):
         ):
             truncated = True
 
-        obs_vec = _flatten_obs(raw_obs, self._raw_obs_space)
+        obs_out = self.format_obs(raw_obs)
         if self.is_discrete:
             mask = (
-                self._action_mask_fn(obs_vec, info)
+                self._action_mask_fn(obs_out, info)
                 if self._action_mask_fn is not None
                 else _extract_action_mask(self.raw_env, info, self.action_dim)
             )
             if mask is not None:
                 info["action_mask"] = np.asarray(mask, dtype=np.bool_)
-        return obs_vec, reward, terminated, truncated, info
-
-    def close(self) -> None:
-        if hasattr(self.raw_env, "close"):
-            self.raw_env.close()
+        return obs_out, reward, terminated, truncated, info
 
 
 def ensure_gym_env(
@@ -587,6 +732,8 @@ def ensure_gym_env(
     max_episode_steps: int | None = None,
     action_mask_fn: Callable[[Any, dict[str, Any]], np.ndarray] | None = None,
     heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
+    structured_obs: bool = False,
+    extractor_type: str = "auto",
 ) -> UniversalGymAdapter:
     """Wrap any Gymnasium / legacy Gym / dm_control / custom sim into UniversalGymAdapter."""
     if isinstance(env_or_factory, UniversalGymAdapter):
@@ -596,6 +743,408 @@ def ensure_gym_env(
         max_episode_steps=max_episode_steps,
         action_mask_fn=action_mask_fn,
         heuristic_fn=heuristic_fn,
+        structured_obs=structured_obs,
+        extractor_type=extractor_type,
+    )
+
+
+@dataclass
+class VectorStepBatch:
+    """Standardized batched step transition across ``num_envs`` parallel slots."""
+
+    obs: Any
+    final_obs: Any
+    rewards: np.ndarray
+    terminateds: np.ndarray
+    truncateds: np.ndarray
+    dones: np.ndarray
+    valid_transition: np.ndarray
+    action_masks: np.ndarray | None
+    completed_episodes: list[tuple[float, int]]
+    infos: list[dict[str, Any]]
+
+
+def _extract_batch_action_masks(
+    raw_info: Any,
+    num_envs: int,
+    action_dim: int,
+    action_mask_fn: Callable[[Any, dict[str, Any]], np.ndarray] | None,
+    obs_batch: Any,
+) -> np.ndarray | None:
+    if action_mask_fn is not None:
+        masks = [
+            np.asarray(
+                action_mask_fn(
+                    slice_obs(obs_batch, i),
+                    _extract_vec_info(raw_info, i, num_envs) if isinstance(raw_info, dict) else {},
+                ),
+                dtype=np.bool_,
+            ).reshape(action_dim)
+            for i in range(num_envs)
+        ]
+        return np.stack(masks, axis=0)
+    if not isinstance(raw_info, dict):
+        return None
+    for key in ("action_mask", "valid_action_mask", "avail_actions"):
+        if key not in raw_info or raw_info[key] is None:
+            continue
+        raw_m = raw_info[key]
+        flag = raw_info.get(f"_{key}")
+        try:
+            arr = np.asarray(raw_m, dtype=np.bool_)
+            if arr.shape == (num_envs, action_dim) and flag is None:
+                return arr
+        except (TypeError, ValueError):
+            pass
+        out = np.ones((num_envs, action_dim), dtype=np.bool_)
+        any_present = False
+        for i in range(num_envs):
+            if flag is not None and i < len(flag) and not bool(flag[i]):
+                continue
+            item = raw_m[i] if i < len(raw_m) else None
+            if item is not None:
+                out[i] = np.asarray(item, dtype=np.bool_).reshape(action_dim)
+                any_present = True
+        if any_present:
+            return out
+    return None
+
+
+class VectorizedEnvAdapter:
+    """True batched environment runner handling Sync/AsyncVectorEnv (NextStep & SameStep) and single envs."""
+
+    def __init__(
+        self,
+        env_or_factory: Any,
+        *,
+        num_envs: int = 1,
+        vec_mode: str = "auto",
+        extractor_type: str = "auto",
+        structured_obs: bool = True,
+        action_mask_fn: Callable[[Any, dict[str, Any]], np.ndarray] | None = None,
+        heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
+        eval_factory: Callable[[], Any] | None = None,
+    ) -> None:
+        self.extractor_type = str(extractor_type)
+        self._action_mask_fn = action_mask_fn
+        self.heuristic_fn = heuristic_fn
+        self._eval_factory = eval_factory
+        self._owns_raw_vec = False
+
+        if isinstance(env_or_factory, VectorizedEnvAdapter):
+            raise TypeError("Pass raw env or factory to make_vec_env / VectorizedEnvAdapter.")
+
+        if isinstance(env_or_factory, str):
+            env_id = env_or_factory
+
+            def _make_from_id(_id: str = env_id) -> gym.Env[Any, Any]:
+                return gym.make(_id)
+
+            env_or_factory = _make_from_id
+
+        is_factory = (
+            callable(env_or_factory)
+            and (isinstance(env_or_factory, type) or not hasattr(env_or_factory, "step"))
+        )
+        if is_factory and self._eval_factory is None:
+            self._eval_factory = env_or_factory
+
+        if is_factory and int(num_envs) > 1:
+            n_req = int(num_envs)
+            env_fns = [env_or_factory for _ in range(n_req)]
+            vec_cls = gym.vector.AsyncVectorEnv if vec_mode == "async" else gym.vector.SyncVectorEnv
+            if hasattr(gym.vector, "AutoresetMode"):
+                self.raw_env = vec_cls(env_fns, autoreset_mode=gym.vector.AutoresetMode.SAME_STEP)
+            else:
+                self.raw_env = vec_cls(env_fns)
+            self._owns_raw_vec = True
+        else:
+            self.raw_env = env_or_factory() if is_factory else env_or_factory
+
+        self.is_raw_vector = bool(
+            hasattr(self.raw_env, "num_envs")
+            and (hasattr(self.raw_env, "single_observation_space") or hasattr(self.raw_env, "single_action_space"))
+        )
+        self.num_envs = int(getattr(self.raw_env, "num_envs", 1)) if self.is_raw_vector else 1
+        self._single_adapter = (
+            UniversalGymAdapter(
+                self.raw_env,
+                action_mask_fn=action_mask_fn,
+                heuristic_fn=heuristic_fn,
+                structured_obs=structured_obs,
+                extractor_type=self.extractor_type,
+            )
+            if not self.is_raw_vector
+            else None
+        )
+
+        if self._single_adapter is not None:
+            self.obs_spec = self._single_adapter.obs_spec
+            self.obs_dim = self._single_adapter.obs_dim
+            self.action_space = self._single_adapter.action_space
+            self.raw_action_kind = self._single_adapter.raw_action_kind
+            self.is_discrete = self._single_adapter.is_discrete
+            self.action_dim = self._single_adapter.action_dim
+            self.action_nvec = self._single_adapter.action_nvec
+            self.action_low = self._single_adapter.action_low
+            self.action_high = self._single_adapter.action_high
+            self.detected_library = self._single_adapter.detected_library
+            self.autoreset_mode = "single_env"
+        else:
+            raw_obs_space = getattr(self.raw_env, "single_observation_space", getattr(self.raw_env, "observation_space", None))
+            self._action_helper = UniversalGymAdapter(
+                self.raw_env,
+                action_mask_fn=action_mask_fn,
+                heuristic_fn=heuristic_fn,
+                structured_obs=structured_obs,
+                extractor_type=self.extractor_type,
+            )
+            self.obs_spec = infer_obs_spec(raw_obs_space, extractor_type=self.extractor_type)
+            if not structured_obs:
+                self.obs_spec = infer_obs_spec(raw_obs_space, extractor_type="flatten")
+            self.obs_dim = self.obs_spec.flat_dim
+            self.action_space = self._action_helper.action_space
+            self.raw_action_kind = self._action_helper.raw_action_kind
+            self.is_discrete = self._action_helper.is_discrete
+            self.action_dim = self._action_helper.action_dim
+            self.action_nvec = self._action_helper.action_nvec
+            self.action_low = self._action_helper.action_low
+            self.action_high = self._action_helper.action_high
+            self.detected_library = self._action_helper.detected_library
+
+            raw_mode = getattr(self.raw_env, "autoreset_mode", None)
+            mode_str = str(getattr(raw_mode, "value", raw_mode)).lower()
+            if "next" in mode_str:
+                self.autoreset_mode = "next_step"
+            elif "disabled" in mode_str:
+                self.autoreset_mode = "disabled"
+            else:
+                self.autoreset_mode = "same_step"
+
+        self.structured_obs = bool(structured_obs and self.obs_spec.kind != "vector")
+        self._running_ep_ret = np.zeros((self.num_envs,), dtype=np.float64)
+        self._running_ep_len = np.zeros((self.num_envs,), dtype=np.int64)
+        self._pending_reset = np.zeros((self.num_envs,), dtype=np.bool_)
+        self._ep_counter = 0
+        self._base_seed = 0
+
+    def _format_actions_for_env(self, actions: np.ndarray) -> Any:
+        helper = self._single_adapter if self._single_adapter is not None else self._action_helper
+        if not self.is_raw_vector:
+            return actions[0]
+        arr = np.asarray(actions)
+        if self.raw_action_kind == "discrete":
+            return arr.astype(np.int64).reshape(self.num_envs)
+        formatted = [helper._format_step_action(arr[i]) for i in range(self.num_envs)]
+        return np.stack(formatted, axis=0)
+
+    @staticmethod
+    def _single_obs_to_batch(single_obs: Any) -> Any:
+        if isinstance(single_obs, dict):
+            return {k: np.asarray(v)[None, ...] for k, v in single_obs.items()}
+        return np.asarray(single_obs)[None, ...]
+
+    def reset_batch(self, seed: int | None = None) -> tuple[Any, np.ndarray | None]:
+        self._base_seed = int(seed or 0)
+        self._ep_counter = 0
+        self._running_ep_ret.fill(0.0)
+        self._running_ep_len.fill(0)
+        self._pending_reset.fill(False)
+
+        if self._single_adapter is not None:
+            o0, info0 = self._single_adapter.reset(seed=seed)
+            obs_formatted = self._single_obs_to_batch(o0)
+            m0 = info0.get("action_mask")
+            masks = np.asarray(m0, dtype=np.bool_).reshape(1, self.action_dim) if m0 is not None else None
+            return obs_formatted, masks
+
+        res = self.raw_env.reset(seed=seed)
+        raw_obs, raw_info = res if isinstance(res, tuple) and len(res) == 2 else (res, {})
+        obs_batch = format_obs_batch(raw_obs, self.obs_spec, self.num_envs)
+        masks = (
+            _extract_batch_action_masks(raw_info, self.num_envs, self.action_dim, self._action_mask_fn, obs_batch)
+            if self.is_discrete
+            else None
+        )
+        return obs_batch, masks
+
+    def step_batch(self, actions: np.ndarray) -> VectorStepBatch:
+        completed: list[tuple[float, int]] = []
+        if self._single_adapter is not None:
+            act_0 = actions[0] if self.raw_action_kind != "discrete" else int(np.asarray(actions).reshape(-1)[0])
+            o_next, rew, term, trunc, info = self._single_adapter.step(act_0)
+            step_info = info
+            self._running_ep_ret[0] += float(rew)
+            self._running_ep_len[0] += 1
+            done_0 = bool(term or trunc)
+            final_single = self._single_obs_to_batch(o_next)
+            if done_0:
+                completed.append((float(self._running_ep_ret[0]), int(self._running_ep_len[0])))
+                self._running_ep_ret[0] = 0.0
+                self._running_ep_len[0] = 0
+                self._ep_counter += 1
+                o_reset, reset_info = self._single_adapter.reset(seed=self._base_seed + self._ep_counter)
+                obs_batch = self._single_obs_to_batch(o_reset)
+            else:
+                reset_info = info
+                obs_batch = final_single
+            m0 = reset_info.get("action_mask")
+            masks = np.asarray(m0, dtype=np.bool_).reshape(1, self.action_dim) if m0 is not None else None
+            return VectorStepBatch(
+                obs=obs_batch,
+                final_obs=final_single,
+                rewards=np.array([float(rew)], dtype=np.float32),
+                terminateds=np.array([bool(term)], dtype=np.bool_),
+                truncateds=np.array([bool(trunc)], dtype=np.bool_),
+                dones=np.array([done_0], dtype=np.bool_),
+                valid_transition=np.array([True], dtype=np.bool_),
+                action_masks=masks,
+                completed_episodes=completed,
+                infos=[step_info],
+            )
+
+        env_acts = self._format_actions_for_env(actions)
+        out = self.raw_env.step(env_acts)
+        if len(out) == 5:
+            raw_obs, raw_rew, raw_term, raw_trunc, raw_info = out
+            rew_arr = np.asarray(raw_rew, dtype=np.float32).reshape(self.num_envs)
+            term_arr = np.asarray(raw_term, dtype=np.bool_).reshape(self.num_envs)
+            trunc_arr = np.asarray(raw_trunc, dtype=np.bool_).reshape(self.num_envs)
+        elif len(out) == 4:
+            raw_obs, raw_rew, raw_done, raw_info = out
+            rew_arr = np.asarray(raw_rew, dtype=np.float32).reshape(self.num_envs)
+            done_raw = np.asarray(raw_done, dtype=np.bool_).reshape(self.num_envs)
+            trunc_arr = np.array(
+                [bool(_extract_vec_info(raw_info, i, self.num_envs).get("TimeLimit.truncated", False)) for i in range(self.num_envs)],
+                dtype=np.bool_,
+            )
+            term_arr = done_raw & (~trunc_arr)
+        else:
+            raise ValueError(f"Unsupported vectorized env.step() return tuple length: {len(out)}")
+
+        obs_batch = format_obs_batch(raw_obs, self.obs_spec, self.num_envs)
+        done_arr = term_arr | trunc_arr
+        valid_transition = np.ones((self.num_envs,), dtype=np.bool_)
+
+        if isinstance(obs_batch, dict):
+            final_obs_batch: Any = {k: v.copy() for k, v in obs_batch.items()}
+        else:
+            final_obs_batch = obs_batch.copy()
+
+        if self.autoreset_mode == "next_step":
+            for i in range(self.num_envs):
+                if self._pending_reset[i]:
+                    valid_transition[i] = False
+                    self._pending_reset[i] = False
+                    done_arr[i] = True
+                    rew_arr[i] = 0.0
+                    term_arr[i] = False
+                    trunc_arr[i] = False
+                else:
+                    self._running_ep_ret[i] += float(rew_arr[i])
+                    self._running_ep_len[i] += 1
+                    if done_arr[i]:
+                        completed.append((float(self._running_ep_ret[i]), int(self._running_ep_len[i])))
+                        self._running_ep_ret[i] = 0.0
+                        self._running_ep_len[i] = 0
+                        self._pending_reset[i] = True
+        else:
+            final_raw = None
+            final_flag = None
+            if isinstance(raw_info, dict):
+                if "final_obs" in raw_info:
+                    final_raw = raw_info["final_obs"]
+                    final_flag = raw_info.get("_final_obs")
+                elif "final_observation" in raw_info:
+                    final_raw = raw_info["final_observation"]
+                    final_flag = raw_info.get("_final_observation")
+            for i in range(self.num_envs):
+                self._running_ep_ret[i] += float(rew_arr[i])
+                self._running_ep_len[i] += 1
+                if done_arr[i]:
+                    completed.append((float(self._running_ep_ret[i]), int(self._running_ep_len[i])))
+                    self._running_ep_ret[i] = 0.0
+                    self._running_ep_len[i] = 0
+                    if final_raw is not None and (final_flag is None or bool(final_flag[i])) and final_raw[i] is not None:
+                        f_i = format_obs_single(final_raw[i], self.obs_spec)
+                        if isinstance(final_obs_batch, dict) and isinstance(f_i, dict):
+                            for k in final_obs_batch:
+                                if k in f_i:
+                                    final_obs_batch[k][i] = f_i[k]
+                        else:
+                            final_obs_batch[i] = f_i
+
+        masks = (
+            _extract_batch_action_masks(raw_info, self.num_envs, self.action_dim, self._action_mask_fn, obs_batch)
+            if self.is_discrete
+            else None
+        )
+        infos = [_extract_vec_info(raw_info, i, self.num_envs) for i in range(self.num_envs)]
+        return VectorStepBatch(
+            obs=obs_batch,
+            final_obs=final_obs_batch,
+            rewards=rew_arr,
+            terminateds=term_arr,
+            truncateds=trunc_arr,
+            dones=done_arr,
+            valid_transition=valid_transition,
+            action_masks=masks,
+            completed_episodes=completed,
+            infos=infos,
+        )
+
+    def build_eval_env(self, eval_env_or_factory: Any | None = None) -> UniversalGymAdapter:
+        """Build an isolated single-instance adapter for deterministic eval without disturbing train slots."""
+        target = eval_env_or_factory if eval_env_or_factory is not None else self._eval_factory
+        if target is None:
+            target = self.raw_env
+        return ensure_gym_env(
+            target,
+            action_mask_fn=self._action_mask_fn,
+            heuristic_fn=self.heuristic_fn,
+            structured_obs=self.structured_obs,
+            extractor_type=self.extractor_type,
+        )
+
+    def close(self) -> None:
+        if self._owns_raw_vec and hasattr(self.raw_env, "close"):
+            self.raw_env.close()
+
+
+def make_vec_env(
+    env_or_factory: Any,
+    num_envs: int = 1,
+    *,
+    vec_mode: str = "auto",
+    extractor_type: str = "auto",
+    structured_obs: bool = True,
+    action_mask_fn: Callable[[Any, dict[str, Any]], np.ndarray] | None = None,
+    heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
+    eval_factory: Callable[[], Any] | None = None,
+) -> VectorizedEnvAdapter:
+    """Create a vectorized ``VectorizedEnvAdapter`` from a Gym env, VectorEnv, or callable factory."""
+    if isinstance(env_or_factory, VectorizedEnvAdapter):
+        return env_or_factory
+    if isinstance(env_or_factory, UniversalGymAdapter):
+        return VectorizedEnvAdapter(
+            env_or_factory.raw_env,
+            num_envs=1,
+            vec_mode=vec_mode,
+            extractor_type=env_or_factory.extractor_type,
+            structured_obs=structured_obs,
+            action_mask_fn=env_or_factory._action_mask_fn,
+            heuristic_fn=env_or_factory.heuristic_fn,
+            eval_factory=eval_factory,
+        )
+    return VectorizedEnvAdapter(
+        env_or_factory,
+        num_envs=num_envs,
+        vec_mode=vec_mode,
+        extractor_type=extractor_type,
+        structured_obs=structured_obs,
+        action_mask_fn=action_mask_fn,
+        heuristic_fn=heuristic_fn,
+        eval_factory=eval_factory,
     )
 
 
@@ -763,23 +1312,41 @@ class SequenceTaskEnv:
 class OfflineTransitionDataset:
     """Static offline RL dataset container for CQL, IQL, and HIL-SERL offline demos."""
 
-    obs: np.ndarray
+    obs: Any
     actions: np.ndarray
     rewards: np.ndarray
-    next_obs: np.ndarray
+    next_obs: Any
     terminateds: np.ndarray
     is_discrete: bool
     action_dim: int
     action_low: np.ndarray | None = None
     action_high: np.ndarray | None = None
     extra: dict[str, Any] = field(default_factory=dict)
+    obs_spec: ObsSpec | None = None
+
+    @property
+    def resolved_obs_spec(self) -> ObsSpec:
+        if self.obs_spec is not None:
+            return self.obs_spec
+        if isinstance(self.obs, dict):
+            return infer_obs_spec(None, slice_obs(self.obs, 0), extractor_type="dict")
+        arr = np.asarray(self.obs)
+        if arr.ndim == 2:
+            return vector_obs_spec(int(arr.shape[1]))
+        return infer_obs_spec(None, arr[0])
 
     @property
     def obs_dim(self) -> int:
-        return int(self.obs.shape[1])
+        if isinstance(self.obs, dict):
+            return sum(int(np.prod(np.asarray(v).shape[1:])) for v in self.obs.values())
+        arr = np.asarray(self.obs)
+        return int(np.prod(arr.shape[1:])) if arr.ndim > 1 else 1
 
     def __len__(self) -> int:
-        return int(self.obs.shape[0])
+        if isinstance(self.obs, dict):
+            first = next(iter(self.obs.values()))
+            return int(np.asarray(first).shape[0])
+        return int(np.asarray(self.obs).shape[0])
 
     @classmethod
     def from_arrays(
@@ -800,14 +1367,33 @@ class OfflineTransitionDataset:
         episode_ids: Any | None = None,
         group_labels: Any | None = None,
         extra: dict[str, Any] | None = None,
+        obs_spec: ObsSpec | None = None,
+        extractor_type: str = "auto",
     ) -> OfflineTransitionDataset:
-        """Build an OfflineTransitionDataset cleanly from NumPy/tabular EHR, finance, or log arrays."""
-        obs_arr = np.asarray(obs, dtype=np.float32)
-        if obs_arr.ndim == 1:
-            obs_arr = obs_arr[:, None]
-        next_arr = np.asarray(next_obs, dtype=np.float32)
-        if next_arr.ndim == 1:
-            next_arr = next_arr[:, None]
+        """Build an OfflineTransitionDataset cleanly from NumPy, image, or Dict offline log arrays."""
+        if isinstance(obs, dict):
+            sample0 = {k: np.asarray(v)[0] for k, v in obs.items()}
+            n_items = int(np.asarray(next(iter(obs.values()))).shape[0])
+            resolved_spec = obs_spec if obs_spec is not None else infer_obs_spec(None, sample0, extractor_type=extractor_type)
+            obs_arr: Any = format_obs_batch(obs, resolved_spec, n_items)
+            next_arr: Any = format_obs_batch(next_obs, resolved_spec, n_items)
+        else:
+            raw_obs_arr = np.asarray(obs)
+            raw_next_arr = np.asarray(next_obs)
+            if raw_obs_arr.ndim <= 2:
+                obs_arr = raw_obs_arr.astype(np.float32)
+                if obs_arr.ndim == 1:
+                    obs_arr = obs_arr[:, None]
+                next_arr = raw_next_arr.astype(np.float32)
+                if next_arr.ndim == 1:
+                    next_arr = next_arr[:, None]
+                resolved_spec = obs_spec if obs_spec is not None else vector_obs_spec(int(obs_arr.shape[1]))
+            else:
+                n_items = int(raw_obs_arr.shape[0])
+                resolved_spec = obs_spec if obs_spec is not None else infer_obs_spec(None, raw_obs_arr[0], extractor_type=extractor_type)
+                obs_arr = format_obs_batch(raw_obs_arr, resolved_spec, n_items)
+                next_arr = format_obs_batch(raw_next_arr, resolved_spec, n_items)
+
         act_raw = np.asarray(actions)
         if is_discrete is None:
             is_discrete = bool(np.issubdtype(act_raw.dtype, np.integer) and act_raw.ndim == 1)
@@ -860,6 +1446,7 @@ class OfflineTransitionDataset:
             action_low=low_arr,
             action_high=high_arr,
             extra=merged_extra,
+            obs_spec=resolved_spec,
         )
 
     @classmethod
@@ -867,11 +1454,16 @@ class OfflineTransitionDataset:
         cls,
         env_or_factory: Any,
         num_steps: int = 2000,
-        policy_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
+        policy_fn: Callable[[Any, dict[str, Any]], Any] | None = None,
         seed: int = 0,
     ) -> OfflineTransitionDataset:
         """Collect an offline dataset using a behavior policy or random exploration."""
-        env = ensure_gym_env(env_or_factory)
+        raw_env = ensure_gym_env(env_or_factory, structured_obs=False)
+        env = (
+            ensure_gym_env(raw_env.raw_env, structured_obs=True, extractor_type=raw_env.extractor_type)
+            if raw_env.obs_spec.kind != "vector" and not raw_env.structured_obs
+            else raw_env
+        )
         rng = np.random.default_rng(seed)
         obs, info = env.reset(seed=seed)
 
@@ -925,15 +1517,24 @@ class OfflineTransitionDataset:
             extra["action_masks"] = np.asarray(mask_list, dtype=np.bool_)
             extra["next_action_masks"] = np.asarray(next_mask_list, dtype=np.bool_)
 
+        if obs_list and isinstance(obs_list[0], dict):
+            obs_packed: Any = {k: np.stack([o[k] for o in obs_list], axis=0) for k in obs_list[0]}
+            next_packed: Any = {k: np.stack([o[k] for o in next_obs_list], axis=0) for k in next_obs_list[0]}
+        else:
+            arr_dtype = np.uint8 if env.obs_spec.dtype == "uint8" else np.float32
+            obs_packed = np.asarray(obs_list, dtype=arr_dtype)
+            next_packed = np.asarray(next_obs_list, dtype=arr_dtype)
+
         return cls(
-            obs=np.asarray(obs_list, dtype=np.float32),
+            obs=obs_packed,
             actions=np.asarray(act_list, dtype=np.int64 if env.is_discrete else np.float32),
             rewards=np.asarray(rew_list, dtype=np.float32),
-            next_obs=np.asarray(next_obs_list, dtype=np.float32),
+            next_obs=next_packed,
             terminateds=np.asarray(term_list, dtype=np.float32),
             is_discrete=env.is_discrete,
             action_dim=env.action_dim,
             action_low=env.action_low,
             action_high=env.action_high,
             extra=extra,
+            obs_spec=env.obs_spec,
         )

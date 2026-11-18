@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import importlib
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, field, fields
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +15,7 @@ import numpy as np
 import torch
 
 from wannado.drl.algos import ALGO_ID_TO_RUNNER
+from wannado.drl.audit.external_adapter import evaluate_external_policy
 from wannado.drl.audit.preflight import PreflightReport, preflight_env
 from wannado.drl.audit.rigor_auditor import RigorAuditReport, audit_drl_rigor
 from wannado.drl.catalog.build_catalog import load_catalog
@@ -25,7 +26,11 @@ from wannado.drl.core.provenance import (
     resolve_run_optimizations,
 )
 from wannado.drl.core.types import EpisodeEvalStats, TrainResult
-from wannado.drl.core.utils import aggregate_seed_stats
+from wannado.drl.core.utils import (
+    aggregate_seed_stats,
+    compute_performance_profile,
+    probability_of_improvement,
+)
 from wannado.drl.core.wrappers import OfflineTransitionDataset
 from wannado.drl.mdp.spec import MDPSpec
 
@@ -146,8 +151,28 @@ def _write_fallback_svg(report: DRLReport, svg_path: Path) -> Path:
     return svg_path
 
 
+def _extract_seed_eval_scores(summary: AlgoExperimentSummary) -> list[float]:
+    """Extract per-seed scalar evaluation scores cleanly for bootstrap/rliable comparisons."""
+    scores: list[float] = []
+    for run in summary.seed_runs:
+        es = run.get("eval_stats")
+        if isinstance(es, dict) and "mean_return" in es:
+            scores.append(float(es["mean_return"]))
+            continue
+        diag = run.get("train_diagnostics") or {}
+        if "ope_fqe_value" in diag:
+            scores.append(float(diag["ope_fqe_value"]))
+            continue
+        lc = run.get("learning_curve") or []
+        if lc and "episode_return" in lc[-1]:
+            scores.append(float(lc[-1]["episode_return"]))
+    if not scores:
+        scores = [float(summary.seed_stats.get("mean", 0.0))]
+    return scores
+
+
 def _generate_overview_figure(report: DRLReport, out_dir: Path) -> Path:
-    """Render a clean 2-panel learning curve + evaluation IQM bar chart (PNG via matplotlib or SVG fallback)."""
+    """Render a 3-panel learning curve + IQM (95% Bootstrap CI) + Performance Profile figure."""
     try:
         import matplotlib
 
@@ -157,8 +182,8 @@ def _generate_overview_figure(report: DRLReport, out_dir: Path) -> Path:
         return _write_fallback_svg(report, out_dir / "results_overview.svg")
 
     png_path = out_dir / "results_overview.png"
-    fig, (ax_curve, ax_bar) = plt.subplots(1, 2, figsize=(11.5, 4.3), dpi=160)
-    colors = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777"]
+    fig, (ax_curve, ax_bar, ax_prof) = plt.subplots(1, 3, figsize=(15.2, 4.4), dpi=160)
+    colors = ["#2563eb", "#059669", "#d97706", "#7c3aed", "#db2777", "#0891b2"]
 
     has_curves = False
     for idx, s in enumerate(report.algo_summaries):
@@ -204,39 +229,65 @@ def _generate_overview_figure(report: DRLReport, out_dir: Path) -> Path:
         ax_curve.legend(loc="best", fontsize=8)
 
     labels: list[str] = []
-    means: list[float] = []
-    stds: list[float] = []
     iqms: list[float] = []
+    means: list[float] = []
+    ci_low_errs: list[float] = []
+    ci_high_errs: list[float] = []
     bar_colors: list[str] = []
     if report.random_baseline is not None:
         labels.append("Random")
-        means.append(float(report.random_baseline.mean_return))
-        stds.append(float(report.random_baseline.std_return))
-        iqms.append(float(report.random_baseline.mean_return))
+        rm = float(report.random_baseline.mean_return)
+        rs = float(report.random_baseline.std_return)
+        iqms.append(rm)
+        means.append(rm)
+        ci_low_errs.append(rs)
+        ci_high_errs.append(rs)
         bar_colors.append("#94a3b8")
     if report.heuristic_baseline is not None:
         labels.append("Heuristic")
-        means.append(float(report.heuristic_baseline.mean_return))
-        stds.append(float(report.heuristic_baseline.std_return))
-        iqms.append(float(report.heuristic_baseline.mean_return))
+        hm = float(report.heuristic_baseline.mean_return)
+        hs = float(report.heuristic_baseline.std_return)
+        iqms.append(hm)
+        means.append(hm)
+        ci_low_errs.append(hs)
+        ci_high_errs.append(hs)
         bar_colors.append("#64748b")
     for idx, s in enumerate(report.algo_summaries):
         audit_tag = "PASS" if (s.audit is None or s.audit.passed) else "WARN"
         labels.append(f"{s.algo_id}\n({audit_tag})")
+        iqm_v = float(s.seed_stats["iqm"])
+        lo_v = float(s.seed_stats.get("iqm_ci_low", iqm_v))
+        hi_v = float(s.seed_stats.get("iqm_ci_high", iqm_v))
+        iqms.append(iqm_v)
         means.append(float(s.seed_stats["mean"]))
-        stds.append(float(s.seed_stats["std"]))
-        iqms.append(float(s.seed_stats["iqm"]))
+        ci_low_errs.append(max(0.0, iqm_v - lo_v))
+        ci_high_errs.append(max(0.0, hi_v - iqm_v))
         bar_colors.append(colors[idx % len(colors)])
 
     x_pos = np.arange(len(labels))
-    ax_bar.bar(x_pos, means, yerr=stds, capsize=4, color=bar_colors, alpha=0.88, edgecolor="#1e293b", linewidth=0.6)
-    ax_bar.scatter(x_pos, iqms, color="#facc15", edgecolor="#0f172a", zorder=5, s=42, label="IQM")
+    yerr = np.vstack([ci_low_errs, ci_high_errs]) if labels else np.zeros((2, 0))
+    ax_bar.bar(x_pos, iqms, yerr=yerr, capsize=4, color=bar_colors, alpha=0.88, edgecolor="#1e293b", linewidth=0.6, label="IQM (95% CI)")
+    ax_bar.scatter(x_pos, means, color="#facc15", edgecolor="#0f172a", zorder=5, s=38, label="Mean")
     ax_bar.set_xticks(x_pos)
     ax_bar.set_xticklabels(labels, fontsize=8)
-    ax_bar.set_title(f"Final Evaluation ({len(report.seeds)} seed(s))")
+    ax_bar.set_title(f"IQM & 95% Bootstrap CI ({len(report.seeds)} seed(s))")
     ax_bar.set_ylabel("Deterministic Eval Return")
     ax_bar.grid(True, axis="y", linestyle=":", alpha=0.45)
     ax_bar.legend(loc="best", fontsize=8)
+
+    profiles = report.performance_profiles(num_points=25, normalize=False)
+    taus = profiles.get("thresholds", [])
+    curves = profiles.get("curves", {})
+    for idx, s in enumerate(report.algo_summaries):
+        if s.algo_id in curves and taus:
+            ax_prof.plot(taus, curves[s.algo_id], label=s.algo_id, color=colors[idx % len(colors)], linewidth=2.0)
+    ax_prof.set_title("Performance Profile (rliable)")
+    ax_prof.set_xlabel("Score Threshold τ")
+    ax_prof.set_ylabel("P(Return ≥ τ)")
+    ax_prof.set_ylim(-0.04, 1.05)
+    ax_prof.grid(True, linestyle=":", alpha=0.45)
+    if curves:
+        ax_prof.legend(loc="best", fontsize=8)
 
     fig.tight_layout()
     fig.savefig(png_path, bbox_inches="tight")
@@ -260,6 +311,46 @@ class DRLReport:
     heuristic_baseline: EpisodeEvalStats | None
     algo_summaries: list[AlgoExperimentSummary] = field(default_factory=list)
     notes: str = ""
+
+    def pairwise_improvement_probabilities(
+        self,
+        *,
+        n_bootstrap: int = 2000,
+        seed: int = 42,
+    ) -> list[dict[str, Any]]:
+        """Compute rliable pairwise Mann-Whitney probability of improvement P(A > B) with 95% CIs."""
+        pairs: list[dict[str, Any]] = []
+        n = len(self.algo_summaries)
+        for i in range(n):
+            for j in range(i + 1, n):
+                sa = self.algo_summaries[i]
+                sb = self.algo_summaries[j]
+                if float(sa.seed_stats.get("iqm", 0.0)) < float(sb.seed_stats.get("iqm", 0.0)):
+                    sa, sb = sb, sa
+                scores_a = _extract_seed_eval_scores(sa)
+                scores_b = _extract_seed_eval_scores(sb)
+                res = probability_of_improvement(scores_a, scores_b, n_bootstrap=n_bootstrap, seed=seed)
+                pairs.append(
+                    {
+                        "algo_a": sa.algo_id,
+                        "algo_b": sb.algo_id,
+                        "prob_a_beats_b": round(res["prob"], 4),
+                        "ci_low": round(res["ci_low"], 4),
+                        "ci_high": round(res["ci_high"], 4),
+                        "statistically_significant": bool(res["significant"] > 0.5),
+                    }
+                )
+        return pairs
+
+    def performance_profiles(
+        self,
+        *,
+        num_points: int = 25,
+        normalize: bool = False,
+    ) -> dict[str, Any]:
+        """Compute score distribution performance profiles tau -> P(score >= tau) across algorithms."""
+        scores_map = {s.algo_id: _extract_seed_eval_scores(s) for s in self.algo_summaries}
+        return compute_performance_profile(scores_map, num_points=num_points, normalize=normalize)
 
     def verified_bibliography(self) -> list[dict[str, Any]]:
         """Collect deduplicated verified literature citations for algorithms, optimizations, and rigor audits."""
@@ -320,6 +411,8 @@ class DRLReport:
                 }
                 for s in self.algo_summaries
             ],
+            "pairwise_improvement": self.pairwise_improvement_probabilities(),
+            "performance_profiles": self.performance_profiles(),
             "verified_bibliography": self.verified_bibliography(),
         }
 
@@ -352,7 +445,7 @@ class DRLReport:
             "  \\label{tab:wannado_drl_results}",
             "  \\begin{tabular}{lllcccc}",
             "    \\toprule",
-            "    Algorithm & Optimizations Cited & Paradigm & Eval Mean $\\pm$ Std $\\uparrow$ & IQM $\\uparrow$ & Median & Audit \\\\",
+            "    Algorithm & Optimizations Cited & Paradigm & Eval Mean $\\pm$ Std $\\uparrow$ & IQM (95\\% CI) $\\uparrow$ & Median & Audit \\\\",
             "    \\midrule",
         ]
         if self.random_baseline is not None:
@@ -377,9 +470,12 @@ class DRLReport:
                 )
             )
             opt_cell = f"\\cite{{{','.join(opt_keys)}}}" if opt_keys else "--"
+            iqm_lo = st.get("iqm_ci_low", st["iqm"])
+            iqm_hi = st.get("iqm_ci_high", st["iqm"])
+            iqm_cell = f"{st['iqm']:.2f} [{iqm_lo:.2f}, {iqm_hi:.2f}]"
             lines.append(
                 f"    {algo_cell} & {opt_cell} & {_esc(s.paradigm)} & "
-                f"${st['mean']:.2f} \\pm {st['std']:.2f}$ & {st['iqm']:.2f} & {st['median']:.2f} & {audit_str} \\\\"
+                f"${st['mean']:.2f} \\pm {st['std']:.2f}$ & {iqm_cell} & {st['median']:.2f} & {audit_str} \\\\"
             )
         lines.extend(["    \\bottomrule", "  \\end{tabular}", "\\end{table}", ""])
         return "\n".join(lines)
@@ -400,14 +496,16 @@ class DRLReport:
             cit_key = str(s.citation.get("key", "")).strip() if s.citation else ""
             cit_tag = f" [`@{cit_key}`]" if cit_key else ""
             opt_tags = ", ".join(f"`{opt['id']}`" for opt in s.optimizations_used) or "none"
+            iqm_lo = s.seed_stats.get("iqm_ci_low", s.seed_stats["iqm"])
+            iqm_hi = s.seed_stats.get("iqm_ci_high", s.seed_stats["iqm"])
             lines.append(
                 f"- **{s.display_name}** (`{s.algo_id}`{cit_tag}; optimizations: {opt_tags}): "
-                f"Eval IQM = `{s.seed_stats['iqm']:.2f}` "
-                f"(mean `{s.seed_stats['mean']:.2f} ± {s.seed_stats['std']:.2f}` across {len(s.seeds)} seeds) — {verdict}."
+                f"Eval IQM = `{s.seed_stats['iqm']:.2f}` (95% CI `[{iqm_lo:.2f}, {iqm_hi:.2f}]`, "
+                f"mean `{s.seed_stats['mean']:.2f} ± {s.seed_stats['std']:.2f}` across {len(s.seeds)} seeds) — {verdict}."
             )
         lines.extend([
             "",
-            "| Method | Eval Mean ± Std | IQM | Median | Audit | Primary Citation | Active Optimizations |",
+            "| Method | Eval Mean ± Std | IQM (95% Bootstrap CI) | Median | Audit | Primary Citation | Active Optimizations |",
             "| :--- | :---: | :---: | :---: | :---: | :--- | :--- |",
         ])
         if self.random_baseline is not None:
@@ -421,10 +519,27 @@ class DRLReport:
             audit_str = "PASS" if (s.audit is None or s.audit.passed) else f"WARN ({', '.join(s.audit.red_flags)})"
             ckey = str(s.citation.get("key", "")).strip() if s.citation else "--"
             opt_str = ", ".join(f"`{o['id']}` (`@{o['citation']['key']}`)" for o in s.optimizations_used if o.get("citation", {}).get("key")) or "--"
+            iqm_lo = st.get("iqm_ci_low", st["iqm"])
+            iqm_hi = st.get("iqm_ci_high", st["iqm"])
             lines.append(
                 f"| **{s.display_name}** (`{s.algo_id}`) | {st['mean']:.2f} ± {st['std']:.2f} | "
-                f"{st['iqm']:.2f} | {st['median']:.2f} | {audit_str} | `@{ckey}` | {opt_str} |"
+                f"{st['iqm']:.2f} [{iqm_lo:.2f}, {iqm_hi:.2f}] | {st['median']:.2f} | {audit_str} | `@{ckey}` | {opt_str} |"
             )
+        pairs = self.pairwise_improvement_probabilities()
+        if pairs:
+            lines.extend([
+                "",
+                "### Pairwise Probability of Improvement (`rliable`, `@agarwal2021deep`)",
+                "",
+                "| Comparison | P(A > B) | 95% Bootstrap CI | Significant? |",
+                "| :--- | :---: | :---: | :---: |",
+            ])
+            for p in pairs:
+                sig_tag = "Yes" if p["statistically_significant"] else "No"
+                lines.append(
+                    f"| `{p['algo_a']}` vs `{p['algo_b']}` | {p['prob_a_beats_b']:.3f} | "
+                    f"[{p['ci_low']:.3f}, {p['ci_high']:.3f}] | {sig_tag} |"
+                )
         lines.append("")
         if self.mdp_spec is not None:
             lines.append("## 2. Formal Problem-to-MDP Specification")
@@ -546,11 +661,13 @@ def build_algo_config(algo_id: str, **overrides: Any) -> Any | None:
 
 def evaluate_drl_suite(
     env_or_factory: Any,
-    algos: Sequence[str | Callable[..., TrainResult]],
+    algos: Sequence[str | Callable[..., TrainResult]] = (),
     *,
     seeds: Sequence[int] = (0, 1, 2),
     min_seeds: int = 3,
     algo_configs: dict[str, Any] | None = None,
+    external_policies: Mapping[str, Any] | None = None,
+    eval_episodes: int = 10,
     mdp_spec: MDPSpec | None = None,
     heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
     preflight_report: PreflightReport | None = None,
@@ -560,7 +677,7 @@ def evaluate_drl_suite(
     run_audit: bool = True,
     device: str = "auto",
 ) -> DRLReport:
-    """Run Stage 1 Preflight -> Multi-Seed Training -> Stage 3 Rigor Audit -> Stage 4 Report."""
+    """Run Stage 1 Preflight -> Multi-Seed Training / External Eval -> Stage 3 Audit -> Stage 4 Report."""
     cards_by_id = {c["id"]: c for c in load_catalog()}
     pf = preflight_report if preflight_report is not None else (preflight_env(env_or_factory, heuristic_fn=heuristic_fn) if run_preflight else None)
     rand_base = pf.random_baseline if pf is not None else None
@@ -573,18 +690,18 @@ def evaluate_drl_suite(
         cfg_obj = (algo_configs or {}).get(aid)
         seed_runs: list[TrainResult] = []
         for s in seeds:
-            target = (
-                env_or_factory()
-                if callable(env_or_factory) and (isinstance(env_or_factory, type) or not hasattr(env_or_factory, "step"))
-                else env_or_factory
-            )
             if cfg_obj is not None:
-                # Clone dataclass config with seed override
-                cfg_copy = type(cfg_obj)(**{**asdict(cfg_obj), "seed": int(s)})
-                res = fn(target, config=cfg_copy)
+                # Clone dataclass config with seed override (and isolate per-seed checkpoint dirs)
+                cfg_kwargs = {**asdict(cfg_obj), "seed": int(s)}
+                if cfg_kwargs.get("checkpoint_dir"):
+                    cfg_kwargs["checkpoint_dir"] = str(Path(str(cfg_kwargs["checkpoint_dir"])) / aid / f"seed_{s}")
+                if cfg_kwargs.get("tb_log_dir"):
+                    cfg_kwargs["tb_log_dir"] = str(Path(str(cfg_kwargs["tb_log_dir"])) / aid / f"seed_{s}")
+                cfg_copy = type(cfg_obj)(**cfg_kwargs)
+                res = fn(env_or_factory, config=cfg_copy)
             else:
                 default_cfg = build_algo_config(aid, seed=int(s), device=device)
-                res = fn(target, config=default_cfg) if default_cfg is not None else fn(target)
+                res = fn(env_or_factory, config=default_cfg) if default_cfg is not None else fn(env_or_factory)
             seed_runs.append(res)
 
         if isinstance(env_or_factory, OfflineTransitionDataset):
@@ -649,6 +766,52 @@ def evaluate_drl_suite(
                 audit=audit,
                 seed_runs=[r.to_summary_dict() for r in seed_runs],
                 optimizations_used=[opt.to_dict() for opt in resolved_opts],
+            )
+        )
+
+    for ext_id, ext_policy in (external_policies or {}).items():
+        ext_runs = evaluate_external_policy(
+            env_or_factory,
+            ext_policy,
+            algo_id=ext_id,
+            eval_episodes=eval_episodes,
+            eval_seed=int(seeds[0]) * 100 + 1000 if seeds else 1000,
+            device=device if device != "auto" else "cpu",
+        )
+        ext_vals = [r.eval_stats.mean_return for r in ext_runs if r.eval_stats is not None]
+        ext_audit = (
+            audit_drl_rigor(
+                ext_runs,
+                preflight_report=pf,
+                mdp_spec=mdp_spec,
+                random_baseline=rand_base,
+                heuristic_baseline=heur_base,
+                min_seeds=min_seeds,
+            )
+            if run_audit
+            else None
+        )
+        ext_opts = resolve_run_optimizations(
+            ext_id,
+            config=ext_runs[0].config if ext_runs else None,
+            explicit_ids=[oid for r in ext_runs for oid in r.optimizations_used],
+            saw_action_mask=bool(pf is not None and pf.summary.get("saw_action_mask")),
+        )
+        summaries.append(
+            AlgoExperimentSummary(
+                algo_id=ext_id,
+                display_name=ext_id,
+                family="external",
+                paradigm=str(ext_runs[0].config.get("external_backend", "external")) if ext_runs else "external",
+                seeds=[r.seed for r in ext_runs],
+                seed_stats=aggregate_seed_stats(ext_vals),
+                mean_elapsed_sec=float(np.mean([r.elapsed_seconds for r in ext_runs])),
+                total_timesteps_per_seed=int(np.mean([r.total_timesteps for r in ext_runs])),
+                hyperparameters=ext_runs[0].config if ext_runs else {},
+                citation={},
+                audit=ext_audit,
+                seed_runs=[r.to_summary_dict() for r in ext_runs],
+                optimizations_used=[opt.to_dict() for opt in ext_opts],
             )
         )
 

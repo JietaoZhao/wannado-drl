@@ -27,13 +27,18 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+from wannado.drl.core.algo_helpers import (
+    finalize_online_run,
+    maybe_periodic_hooks,
+    maybe_resume_online_run,
+    setup_online_run,
+)
 from wannado.drl.core.buffers import DualDemoReplayBuffer
 from wannado.drl.core.networks import SquashedGaussianActor, TwinQCritic
-from wannado.drl.core.provenance import resolve_run_optimizations
+from wannado.drl.core.obs_spec import obs_to_tensor, slice_obs
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, hard_update, polyak_update, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import OfflineTransitionDataset, RunningMeanStd, ensure_gym_env
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
+from wannado.drl.core.utils import hard_update, polyak_update, resolve_device, set_global_seed
+from wannado.drl.core.wrappers import OfflineTransitionDataset
 
 META = AlgoMeta(
     id="hil_serl",
@@ -103,8 +108,21 @@ class HILSERLConfig:
     buffer_size: int = 50_000
     batch_size: int = 64
     hidden_dims: tuple[int, ...] = (128, 128)
+    num_envs: int = 1
+    vec_mode: str = "auto"
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
     normalize_obs: bool = False
+    normalize_reward: bool = False
     eval_episodes: int = 10
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    save_replay_buffer: bool = False
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     device: str = "auto"
     seed: int = 42
 
@@ -114,20 +132,61 @@ def train_hil_serl(
     config: HILSERLConfig | None = None,
     *,
     demo_dataset: OfflineTransitionDataset | None = None,
-    intervention_fn: Callable[[np.ndarray, np.ndarray, dict[str, Any]], tuple[bool, np.ndarray]] | None = None,
+    intervention_fn: Callable[[Any, np.ndarray, dict[str, Any]], tuple[bool, np.ndarray]] | None = None,
     eval_env_or_factory: Any | None = None,
 ) -> TrainResult:
     """Train HIL-SERL (RLPD-SAC + LayerNorm Critics + 50/50 Demo/Intervention Replay)."""
     cfg = config or HILSERLConfig()
     rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
-    env = ensure_gym_env(env_or_factory)
-    if env.is_discrete or env.action_low is None or env.action_high is None:
+    ctx = setup_online_run(
+        env_or_factory,
+        num_envs=cfg.num_envs,
+        vec_mode=cfg.vec_mode,
+        extractor_type=cfg.extractor_type,
+        normalize_obs=cfg.normalize_obs,
+        normalize_reward=cfg.normalize_reward,
+        gamma=cfg.gamma,
+        checkpoint_dir=cfg.checkpoint_dir,
+        checkpoint_freq=cfg.checkpoint_freq,
+        eval_freq=cfg.eval_freq,
+        save_best_model=cfg.save_best_model,
+        keep_last_k=cfg.keep_last_k,
+        save_replay_buffer=cfg.save_replay_buffer,
+        tb_log_dir=cfg.tb_log_dir,
+        eval_env_or_factory=eval_env_or_factory,
+        device=dev,
+    )
+    env, obs_rms, ret_rms = ctx.env, ctx.obs_rms, ctx.ret_rms
+    if env.is_discrete or env.action_nvec is not None or env.action_low is None or env.action_high is None:
+        ctx.env.close()
         raise ValueError("hil_serl requires bounded continuous Box action spaces.")
 
-    actor = SquashedGaussianActor(env.obs_dim, env.action_dim, env.action_low, env.action_high, cfg.hidden_dims).to(dev)
-    critic = TwinQCritic(env.obs_dim, env.action_dim, cfg.hidden_dims, use_layer_norm=True).to(dev)
-    target_critic = TwinQCritic(env.obs_dim, env.action_dim, cfg.hidden_dims, use_layer_norm=True).to(dev)
+    actor = SquashedGaussianActor(
+        env.obs_spec,
+        env.action_dim,
+        env.action_low,
+        env.action_high,
+        cfg.hidden_dims,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+    ).to(dev)
+    critic = TwinQCritic(
+        env.obs_spec,
+        env.action_dim,
+        cfg.hidden_dims,
+        use_layer_norm=True,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+    ).to(dev)
+    target_critic = TwinQCritic(
+        env.obs_spec,
+        env.action_dim,
+        cfg.hidden_dims,
+        use_layer_norm=True,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+    ).to(dev)
     hard_update(critic, target_critic)
 
     actor_opt = torch.optim.Adam(actor.parameters(), lr=cfg.actor_lr)
@@ -136,69 +195,113 @@ def train_hil_serl(
     alpha_opt = torch.optim.Adam([log_alpha], lr=cfg.alpha_lr) if cfg.autotune_alpha else None
     target_entropy = -float(env.action_dim)
 
-    replay = DualDemoReplayBuffer(cfg.buffer_size, env.obs_dim, env.action_dim, discrete_action=False, device=dev)
-    obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
+    replay = DualDemoReplayBuffer(cfg.buffer_size, env.obs_spec, env.action_dim, discrete_action=False, device=dev)
+    policy_spec = {
+        "net_class": "SquashedGaussianActor",
+        "init_kwargs": {
+            "action_dim": int(env.action_dim),
+            "action_low": env.action_low.tolist(),
+            "action_high": env.action_high.tolist(),
+            "hidden_dims": list(cfg.hidden_dims),
+            "extractor_type": cfg.extractor_type,
+            "extractor_kwargs": cfg.extractor_kwargs,
+        },
+    }
+    models_map: dict[str, Any] = {
+        "actor": actor,
+        "critic": critic,
+        "target_critic": target_critic,
+        "log_alpha": log_alpha,
+    }
+    opts_map: dict[str, torch.optim.Optimizer] = {"actor": actor_opt, "critic": critic_opt}
+    if alpha_opt is not None:
+        opts_map["alpha"] = alpha_opt
 
-    # Preload initial offline demonstrations into demo buffer if supplied
-    if demo_dataset is not None:
+    cfg_dict = asdict(cfg)
+    resumed_extra: dict[str, Any] = {}
+    steps, ep_idx, learning_curve = maybe_resume_online_run(
+        ctx,
+        resume_from=cfg.resume_from,
+        models=models_map,
+        optimizers=opts_map,
+        rng=rng,
+        replay_buffer=replay if cfg.resume_from else None,
+        extra_out=resumed_extra,
+    )
+    intervention_count = int(resumed_extra.get("human_interventions", 0))
+
+    # Preload initial offline demonstrations into demo buffer if not already restored from replay sidecar
+    if demo_dataset is not None and replay.demo_buffer.size == 0:
         for i in range(len(demo_dataset)):
-            o = demo_dataset.obs[i]
-            no = demo_dataset.next_obs[i]
+            o = slice_obs(demo_dataset.obs, i)
+            no = slice_obs(demo_dataset.next_obs, i)
             if obs_rms is not None:
-                obs_rms.update(o)
+                if steps == 0:
+                    obs_rms.update(o)
                 o = obs_rms.normalize(o)
                 no = obs_rms.normalize(no)
             replay.add_demo(o, demo_dataset.actions[i], float(demo_dataset.rewards[i]), no, bool(demo_dataset.terminateds[i]))
 
     t0 = time.perf_counter()
-    obs, info = env.reset(seed=cfg.seed)
-    ep_ret, ep_idx = 0.0, 0
-    intervention_count = 0
-    learning_curve: list[dict[str, float]] = []
+    obs, _ = env.reset_batch(seed=cfg.seed)
+    infos: list[dict[str, Any]] = [{} for _ in range(env.num_envs)]
     q_hist: list[float] = []
 
-    for step in range(1, cfg.total_timesteps + 1):
+    while steps < cfg.total_timesteps:
         if obs_rms is not None:
             obs_rms.update(obs)
             obs_proc = obs_rms.normalize(obs)
         else:
             obs_proc = obs
 
-        if step < cfg.learning_starts and replay.demo_buffer.size == 0:
-            proposed = rng.uniform(env.action_low, env.action_high).astype(np.float32)
+        if steps < cfg.learning_starts and replay.demo_buffer.size == 0:
+            proposed = rng.uniform(env.action_low, env.action_high, size=(env.num_envs, env.action_dim)).astype(np.float32)
         else:
             with torch.no_grad():
-                a_t, _ = actor.get_action(torch.as_tensor(obs_proc, device=dev, dtype=torch.float32).unsqueeze(0))
-                proposed = a_t.squeeze(0).cpu().numpy()
+                obs_t = obs_to_tensor(obs_proc, env.obs_spec, dev, add_batch_dim=False)
+                a_t, _ = actor.get_action(obs_t)
+                proposed = a_t.cpu().numpy().astype(np.float32)
 
         # [AI-Prompt Hook]: Real-time human intervention takeover sends corrections into BOTH buffers.
-        intervened = False
-        act = proposed
+        acts = proposed.copy()
+        intervened_slots: list[int] = []
         if intervention_fn is not None:
-            intervened, human_act = intervention_fn(obs, proposed, info)
-            if intervened:
-                act = np.clip(np.asarray(human_act, dtype=np.float32), env.action_low, env.action_high)
-                intervention_count += 1
+            for i in range(env.num_envs):
+                intervened, human_act = intervention_fn(slice_obs(obs, i), proposed[i], infos[i])
+                if intervened:
+                    acts[i] = np.clip(np.asarray(human_act, dtype=np.float32), env.action_low, env.action_high)
+                    intervention_count += 1
+                    intervened_slots.append(i)
 
-        next_obs, reward, term, trunc, next_info = env.step(act)
-        ep_ret += float(reward)
-        next_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
-        replay.add_online(obs_proc, act, float(reward), next_proc, bool(term))
-        if intervened:
-            replay.add_demo(obs_proc, act, float(reward), next_proc, bool(term))
+        sb = env.step_batch(acts)
+        valid_count = int(np.sum(sb.valid_transition))
+        train_rewards = ret_rms.normalize_batch(sb.rewards, sb.dones) if ret_rms is not None else sb.rewards
+        next_proc = obs_rms.normalize(sb.final_obs) if obs_rms is not None else sb.final_obs
+        replay.add_online_batch(obs_proc, acts, train_rewards, next_proc, sb.terminateds, valid_mask=sb.valid_transition)
+        for i in intervened_slots:
+            if bool(sb.valid_transition[i]):
+                replay.add_demo(
+                    slice_obs(obs_proc, i),
+                    acts[i],
+                    float(train_rewards[i]),
+                    slice_obs(next_proc, i),
+                    bool(sb.terminateds[i]),
+                )
+        steps += valid_count
 
-        if term or trunc:
+        for ep_ret, _ in sb.completed_episodes:
             ep_idx += 1
-            if ep_idx % 5 == 0 or step == cfg.total_timesteps:
-                learning_curve.append({"step": float(step), "episode_return": float(ep_ret)})
-            obs, info = env.reset(seed=cfg.seed + ep_idx)
-            ep_ret = 0.0
-        else:
-            obs, info = next_obs, next_info
+            if ep_idx % 5 == 0 or len(learning_curve) == 0 or steps >= cfg.total_timesteps:
+                learning_curve.append({"step": float(steps), "episode_return": float(ep_ret)})
+            if ctx.ckpt_mgr is not None:
+                ctx.ckpt_mgr.log_scalars(steps, {"train/episode_return": float(ep_ret)})
+        obs = sb.obs
+        infos = sb.infos
 
         total_stored = replay.demo_buffer.size + replay.online_buffer.size
-        if step >= cfg.learning_starts and total_stored >= cfg.batch_size:
-            for u in range(cfg.utd_ratio):
+        if steps >= cfg.learning_starts and total_stored >= cfg.batch_size:
+            n_updates = max(1, cfg.utd_ratio * max(1, valid_count))
+            for u in range(n_updates):
                 b_obs, b_act, b_rew, b_next, b_term = replay.sample_symmetric(
                     cfg.batch_size, demo_fraction=cfg.demo_fraction, rng=rng
                 )
@@ -217,7 +320,7 @@ def train_hil_serl(
                 q_hist.append(float(q1.mean().item()))
                 polyak_update(critic, target_critic, cfg.tau)
 
-                if u == cfg.utd_ratio - 1:
+                if (u + 1) % cfg.utd_ratio == 0 or u == n_updates - 1:
                     pi_a, log_pi = actor.get_action(b_obs)
                     q1_pi, q2_pi = critic(b_obs, pi_a)
                     actor_loss = (alpha * log_pi - torch.min(q1_pi, q2_pi)).mean()
@@ -231,28 +334,38 @@ def train_hil_serl(
                         alpha_loss.backward()
                         alpha_opt.step()
 
-    if obs_rms is not None:
-        obs_rms.freeze(True)
+        maybe_periodic_hooks(
+            ctx,
+            steps,
+            algo_id=META.id,
+            policy_kind="squashed_actor",
+            policy_spec=policy_spec,
+            primary_model_key="actor",
+            models=models_map,
+            optimizers=opts_map,
+            config_dict=cfg_dict,
+            eval_episodes=cfg.eval_episodes,
+            seed=cfg.seed,
+            ep_idx=ep_idx,
+            learning_curve=learning_curve,
+            rng=rng,
+            replay_buffer=replay if ctx.save_replay_buffer else None,
+            extra_state_fields={"human_interventions": int(intervention_count)},
+        )
 
-    def policy_fn(obs_in: np.ndarray, _info: dict[str, Any] | None = None) -> np.ndarray:
-        o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-        with eval_mode(actor), torch.no_grad():
-            a_t, _ = actor.get_action(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0), deterministic=True)
-            return a_t.squeeze(0).cpu().numpy()
-
-    eval_target = eval_env_or_factory if eval_env_or_factory is not None else env
-    eval_stats = evaluate_policy_episodes(eval_target, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-    cfg_dict = asdict(cfg)
-    opts = resolve_run_optimizations(META.id, config=cfg_dict)
-
-    return TrainResult(
+    return finalize_online_run(
+        ctx,
         algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=cfg.total_timesteps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model={"actor": actor, "critic": critic},
-        config=cfg_dict,
+        policy_kind="squashed_actor",
+        policy_spec=policy_spec,
+        primary_model_key="actor",
+        models=models_map,
+        optimizers=opts_map,
+        result_model={"actor": actor, "critic": critic},
+        config_dict=cfg_dict,
+        steps=steps,
+        t0=t0,
+        ep_idx=ep_idx,
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
@@ -261,8 +374,8 @@ def train_hil_serl(
             "demo_buffer_size": replay.demo_buffer.size,
             "online_buffer_size": replay.online_buffer.size,
         },
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,
-        optimizations_used=[o.id for o in opts],
+        eval_episodes=cfg.eval_episodes,
+        seed=cfg.seed,
+        rng=rng,
+        replay_buffer=replay if ctx.save_replay_buffer else None,
     )

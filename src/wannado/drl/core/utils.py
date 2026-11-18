@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import random
-from collections.abc import Iterator, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from typing import Any
 
@@ -107,18 +107,188 @@ def compute_iqm(values: Sequence[float]) -> float:
     return float(total / max(weight_sum, 1e-12))
 
 
+def _iqm_weights(n: int) -> np.ndarray:
+    """Return exact sorted-index IQM weights for sample count n."""
+    if n <= 2:
+        return np.full(max(1, n), 1.0 / max(1, n), dtype=np.float64)
+    idx = np.arange(n, dtype=np.float64)
+    left = np.maximum(idx, 0.25 * n)
+    right = np.minimum(idx + 1.0, 0.75 * n)
+    w = np.clip(right - left, 0.0, 1.0)
+    return w / max(float(np.sum(w)), 1e-12)
+
+
+def bootstrap_iqm_ci(
+    values: Sequence[float],
+    *,
+    n_bootstrap: int = 2000,
+    ci_level: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Compute IQM with stratified percentile bootstrap confidence interval (Agarwal et al., NeurIPS 2021)."""
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    n = int(arr.size)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    point = compute_iqm(arr.tolist())
+    if n == 1:
+        return point, point, point
+
+    rng = np.random.default_rng(seed)
+    b = max(100, int(n_bootstrap))
+    idx_mat = rng.integers(0, n, size=(b, n))
+    sorted_boot = np.sort(arr[idx_mat], axis=1)
+    boot_iqms = np.sum(sorted_boot * _iqm_weights(n)[None, :], axis=1)
+    alpha = max(1e-4, 1.0 - float(ci_level))
+    lo = float(np.quantile(boot_iqms, 0.5 * alpha))
+    hi = float(np.quantile(boot_iqms, 1.0 - 0.5 * alpha))
+    return float(point), lo, hi
+
+
+def bootstrap_mean_ci(
+    values: Sequence[float],
+    *,
+    n_bootstrap: int = 2000,
+    ci_level: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Compute sample mean with deterministic percentile bootstrap confidence interval."""
+    arr = np.asarray(values, dtype=np.float64).reshape(-1)
+    n = int(arr.size)
+    if n == 0:
+        return 0.0, 0.0, 0.0
+    point = float(np.mean(arr))
+    if n == 1:
+        return point, point, point
+
+    rng = np.random.default_rng(seed)
+    b = max(100, int(n_bootstrap))
+    idx_mat = rng.integers(0, n, size=(b, n))
+    boot_means = np.mean(arr[idx_mat], axis=1)
+    alpha = max(1e-4, 1.0 - float(ci_level))
+    lo = float(np.quantile(boot_means, 0.5 * alpha))
+    hi = float(np.quantile(boot_means, 1.0 - 0.5 * alpha))
+    return point, lo, hi
+
+
+def probability_of_improvement(
+    scores_a: Sequence[float],
+    scores_b: Sequence[float],
+    *,
+    n_bootstrap: int = 2000,
+    ci_level: float = 0.95,
+    seed: int = 42,
+) -> dict[str, float]:
+    """Compute Mann-Whitney P(A > B) and bootstrap 95% CI per rliable (Agarwal et al., NeurIPS 2021)."""
+    a = np.asarray(scores_a, dtype=np.float64).reshape(-1)
+    b = np.asarray(scores_b, dtype=np.float64).reshape(-1)
+    if a.size == 0 or b.size == 0:
+        return {"prob": 0.5, "ci_low": 0.0, "ci_high": 1.0, "significant": 0.0}
+
+    diff = a[:, None] - b[None, :]
+    p_obs = float(np.mean((diff > 1e-12).astype(np.float64) + 0.5 * (np.abs(diff) <= 1e-12).astype(np.float64)))
+
+    if a.size == 1 and b.size == 1:
+        return {"prob": p_obs, "ci_low": p_obs, "ci_high": p_obs, "significant": float(abs(p_obs - 0.5) > 1e-6)}
+
+    rng = np.random.default_rng(seed)
+    n_boot = max(100, int(n_bootstrap))
+    idx_a = rng.integers(0, a.size, size=(n_boot, a.size))
+    idx_b = rng.integers(0, b.size, size=(n_boot, b.size))
+
+    if a.size * b.size <= 512:
+        diff_boot = a[idx_a][:, :, None] - b[idx_b][:, None, :]
+        probs = np.mean(
+            (diff_boot > 1e-12).astype(np.float64) + 0.5 * (np.abs(diff_boot) <= 1e-12).astype(np.float64),
+            axis=(1, 2),
+        )
+    else:
+        probs = np.empty(n_boot, dtype=np.float64)
+        for bi in range(n_boot):
+            d_i = a[idx_a[bi]][:, None] - b[idx_b[bi]][None, :]
+            probs[bi] = float(np.mean((d_i > 1e-12) + 0.5 * (np.abs(d_i) <= 1e-12)))
+
+    alpha = max(1e-4, 1.0 - float(ci_level))
+    lo = float(np.quantile(probs, 0.5 * alpha))
+    hi = float(np.quantile(probs, 1.0 - 0.5 * alpha))
+    sig = float(lo > 0.5 or hi < 0.5)
+    return {"prob": p_obs, "ci_low": lo, "ci_high": hi, "significant": sig}
+
+
+def compute_performance_profile(
+    scores_by_algo: Mapping[str, Sequence[float]],
+    *,
+    thresholds: Sequence[float] | None = None,
+    num_points: int = 25,
+    normalize: bool = False,
+) -> dict[str, Any]:
+    """Compute rliable-style score distribution profiles tau -> P(score >= tau)."""
+    arrays: dict[str, np.ndarray] = {
+        str(k): np.asarray(v, dtype=np.float64).reshape(-1)
+        for k, v in scores_by_algo.items()
+        if len(v) > 0
+    }
+    if not arrays:
+        return {"thresholds": [], "normalized": normalize, "curves": {}}
+
+    all_vals = np.concatenate(list(arrays.values()))
+    v_min = float(np.min(all_vals))
+    v_max = float(np.max(all_vals))
+    span = v_max - v_min
+
+    if normalize:
+        if span > 1e-12:
+            arrays = {k: (v - v_min) / span for k, v in arrays.items()}
+        else:
+            arrays = {k: np.ones_like(v) for k, v in arrays.items()}
+        tau_grid = np.linspace(0.0, 1.0, max(5, int(num_points)))
+    elif thresholds is not None:
+        tau_grid = np.asarray(list(thresholds), dtype=np.float64)
+    else:
+        lo = v_min
+        hi = v_max if span > 1e-12 else v_min + 1.0
+        tau_grid = np.linspace(lo, hi, max(5, int(num_points)))
+
+    curves: dict[str, list[float]] = {}
+    for k, arr in arrays.items():
+        curves[k] = [round(float(np.mean(arr >= float(tau) - 1e-12)), 4) for tau in tau_grid]
+
+    return {
+        "thresholds": [round(float(t), 4) for t in tau_grid],
+        "normalized": bool(normalize),
+        "curves": curves,
+    }
+
+
 def aggregate_seed_stats(values: Sequence[float]) -> dict[str, float]:
-    """Return mean, std, median, min, max, and IQM over multi-seed scores."""
+    """Return mean, std, median, IQM, min, max, and 95% Bootstrap CIs over multi-seed scores."""
     arr = np.asarray(values, dtype=np.float64)
     if arr.size == 0:
-        return {"mean": 0.0, "std": 0.0, "median": 0.0, "iqm": 0.0, "min": 0.0, "max": 0.0}
+        return {
+            "mean": 0.0,
+            "std": 0.0,
+            "median": 0.0,
+            "iqm": 0.0,
+            "min": 0.0,
+            "max": 0.0,
+            "iqm_ci_low": 0.0,
+            "iqm_ci_high": 0.0,
+            "mean_ci_low": 0.0,
+            "mean_ci_high": 0.0,
+        }
+    iqm, iqm_lo, iqm_hi = bootstrap_iqm_ci(arr.tolist())
+    mean, mean_lo, mean_hi = bootstrap_mean_ci(arr.tolist())
     return {
-        "mean": float(np.mean(arr)),
+        "mean": mean,
         "std": float(np.std(arr, ddof=0)),
         "median": float(np.median(arr)),
-        "iqm": compute_iqm(arr.tolist()),
+        "iqm": iqm,
         "min": float(np.min(arr)),
         "max": float(np.max(arr)),
+        "iqm_ci_low": iqm_lo,
+        "iqm_ci_high": iqm_hi,
+        "mean_ci_low": mean_lo,
+        "mean_ci_high": mean_hi,
     }
 
 

@@ -7,6 +7,7 @@ import importlib.util
 import json
 from collections.abc import Sequence
 from pathlib import Path
+from typing import Any
 
 from wannado.drl.agent_kit import install_agent_kit
 from wannado.drl.audit import preflight_env
@@ -21,8 +22,115 @@ from wannado.drl.copilot import (
     scan_project,
 )
 from wannado.drl.mdp import audit_mdp_spec, build_mdp_archetype
-from wannado.drl.reporter import export_citations
+from wannado.drl.reporter import build_algo_config, evaluate_drl_suite, export_citations
 from wannado.drl.workspace import eject_algo, scaffold_lab
+
+
+def _load_interface_from_path(interface_path: str | Path) -> Any:
+    """Dynamically load an isolated EnvInterface instance from drl_lab/interface.py."""
+    iface_path = Path(interface_path).resolve()
+    mod_spec = importlib.util.spec_from_file_location("_wannado_user_iface", iface_path)
+    if mod_spec is None or mod_spec.loader is None:
+        raise FileNotFoundError(f"Cannot load interface module at {iface_path}")
+    mod = importlib.util.module_from_spec(mod_spec)
+    mod_spec.loader.exec_module(mod)
+    return mod.load_env_interface()
+
+
+def verify_interface_gate(
+    interface_path: str | Path,
+    *,
+    algos: Sequence[str] = ("ppo",),
+    external_policy_path: str | Path | None = None,
+    sb3_algo: str | None = None,
+    seeds: Sequence[int] = (0, 1, 2),
+    min_seeds: int = 3,
+    timesteps: int | None = None,
+    eval_episodes: int = 10,
+    out_dir: str | Path = "./drl_lab/outputs",
+) -> tuple[bool, dict[str, Any]]:
+    """Run Stage 1 Preflight+Probes -> Training/External Eval -> Stage 3 Audit -> Stage 4 Gate."""
+    iface = _load_interface_from_path(interface_path)
+    pf = preflight_env(iface.env_or_factory, heuristic_fn=iface.heuristic_fn)
+    out_root = Path(out_dir).resolve()
+    out_root.mkdir(parents=True, exist_ok=True)
+
+    if not pf.ok:
+        verdict: dict[str, Any] = {
+            "passed": False,
+            "stage_failed": "stage1_preflight_and_probes",
+            "errors": list(pf.errors),
+            "warnings": list(pf.warnings),
+            "preflight": pf.to_dict(),
+            "failed_algos": {},
+        }
+        (out_root / "verification_verdict.json").write_text(
+            json.dumps(verdict, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
+        return False, verdict
+
+    algo_configs: dict[str, Any] = {}
+    if timesteps is not None:
+        for aid in algos:
+            cfg_obj = build_algo_config(aid, total_timesteps=int(timesteps), eval_episodes=int(eval_episodes))
+            if cfg_obj is not None:
+                algo_configs[aid] = cfg_obj
+
+    ext_map = (
+        {"external_policy": Path(external_policy_path)}
+        if external_policy_path is not None
+        else None
+    )
+    if ext_map is not None and sb3_algo:
+        from wannado.drl.audit.external_adapter import _load_external_artifact
+
+        ext_map = {"external_policy": _load_external_artifact(external_policy_path, sb3_algo=sb3_algo)}
+
+    report = evaluate_drl_suite(
+        iface.env_or_factory,
+        algos=list(algos),
+        seeds=list(seeds),
+        min_seeds=int(min_seeds),
+        algo_configs=algo_configs or None,
+        external_policies=ext_map,
+        eval_episodes=int(eval_episodes),
+        mdp_spec=getattr(iface, "mdp_spec", None),
+        heuristic_fn=iface.heuristic_fn,
+        preflight_report=pf,
+        task_name=str(getattr(iface, "task_name", "DRLVerifyGate")),
+        domain=str(getattr(iface, "domain", "control")),
+        run_preflight=False,
+        run_audit=True,
+    )
+    saved_files = report.save(out_root)
+    failed_algos = {
+        s.algo_id: list(s.audit.red_flags)
+        for s in report.algo_summaries
+        if s.audit is not None and not s.audit.passed
+    }
+    passed = len(report.algo_summaries) > 0 and len(failed_algos) == 0
+    verdict = {
+        "passed": passed,
+        "stage_failed": None if passed else "stage3_rigor_audit",
+        "preflight_ok": True,
+        "failed_algos": failed_algos,
+        "algorithms": {
+            s.algo_id: {
+                "seed_stats": s.seed_stats,
+                "audit_passed": (s.audit.passed if s.audit is not None else True),
+                "red_flags": (list(s.audit.red_flags) if s.audit is not None else []),
+            }
+            for s in report.algo_summaries
+        },
+        "pairwise_improvement": report.pairwise_improvement_probabilities(),
+        "saved_files": {k: str(v) for k, v in saved_files.items()},
+    }
+    (out_root / "verification_verdict.json").write_text(
+        json.dumps(verdict, indent=2, ensure_ascii=False) + "\n",
+        encoding="utf-8",
+    )
+    return passed, verdict
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -57,7 +165,7 @@ def _build_parser() -> argparse.ArgumentParser:
     p_intake.add_argument("--json", action="store_true", dest="as_json")
 
     # 3. catalog
-    p_cat = sub.add_parser("catalog", help="Search the 27-algorithm DRL metadata catalog across 7 families.")
+    p_cat = sub.add_parser("catalog", help="Search the 30-algorithm DRL metadata catalog across 8 families.")
     p_cat.add_argument("--family", default=None)
     p_cat.add_argument("--paradigm", default=None)
     p_cat.add_argument("--tier", default=None)
@@ -79,6 +187,8 @@ def _build_parser() -> argparse.ArgumentParser:
     p_rec.add_argument("--action-mask", action="store_true")
     p_rec.add_argument("--offline", action="store_true")
     p_rec.add_argument("--human-demos", action="store_true")
+    p_rec.add_argument("--constrained", action="store_true")
+    p_rec.add_argument("--risk-sensitive", action="store_true")
     p_rec.add_argument("--num-agents", type=int, default=1)
     p_rec.add_argument("--json", action="store_true", dest="as_json")
 
@@ -118,6 +228,22 @@ def _build_parser() -> argparse.ArgumentParser:
     # 11. arsenal
     p_ars = sub.add_parser("arsenal", help="Display versioned wannado-drl RL arsenal (Classics -> 2025 Frontier SOTA).")
     p_ars.add_argument("--json", action="store_true", dest="as_json")
+
+    # 12. verify (machine-verifiable AI gate)
+    p_ver = sub.add_parser(
+        "verify",
+        help="Run hard end-to-end verification gate (Preflight + Leakage Probes -> Train/External Policy -> Rigor Audit -> Report).",
+    )
+    p_ver.add_argument("--interface", default="./drl_lab/interface.py", dest="interface_path")
+    p_ver.add_argument("--algos", nargs="*", default=["ppo"])
+    p_ver.add_argument("--policy", default=None, dest="external_policy_path", help="Optional .pt/.pth PolicyBundle or SB3 .zip model to audit.")
+    p_ver.add_argument("--sb3-algo", default=None, help="Optional SB3 class hint (PPO/SAC/TD3/DQN/A2C) for .zip archives.")
+    p_ver.add_argument("--seeds", nargs="+", type=int, default=[0, 1, 2])
+    p_ver.add_argument("--min-seeds", type=int, default=3)
+    p_ver.add_argument("--timesteps", type=int, default=None)
+    p_ver.add_argument("--eval-episodes", type=int, default=10)
+    p_ver.add_argument("--out", default="./drl_lab/outputs", dest="out_dir")
+    p_ver.add_argument("--json", action="store_true", dest="as_json")
 
     return parser
 
@@ -227,6 +353,8 @@ def main(argv: Sequence[str] | None = None) -> int:
             has_invalid_actions=args.action_mask,
             is_offline_only=args.offline,
             has_human_demos=args.human_demos,
+            has_constraints=args.constrained,
+            risk_sensitive=args.risk_sensitive,
             num_agents=args.num_agents,
         )
         payload = {"recommended_suite": suite.to_dict(), "parameter_guide": explain_parameters()}
@@ -268,19 +396,43 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 0
 
     if args.command == "preflight":
-        iface_path = Path(args.interface_path).resolve()
-        mod_spec = importlib.util.spec_from_file_location("_wannado_user_iface", iface_path)
-        if mod_spec is None or mod_spec.loader is None:
-            raise FileNotFoundError(f"Cannot load interface module at {iface_path}")
-        mod = importlib.util.module_from_spec(mod_spec)
-        mod_spec.loader.exec_module(mod)
-        iface = mod.load_env_interface()
+        iface = _load_interface_from_path(args.interface_path)
         pf = preflight_env(iface.env_or_factory, heuristic_fn=iface.heuristic_fn)
         if args.as_json:
             print(json.dumps(pf.to_dict(), indent=2, ensure_ascii=False))
         else:
             print(pf.format_report())
         return 0 if pf.ok else 1
+
+    if args.command == "verify":
+        passed, verdict = verify_interface_gate(
+            args.interface_path,
+            algos=args.algos,
+            external_policy_path=args.external_policy_path,
+            sb3_algo=args.sb3_algo,
+            seeds=args.seeds,
+            min_seeds=args.min_seeds,
+            timesteps=args.timesteps,
+            eval_episodes=args.eval_episodes,
+            out_dir=args.out_dir,
+        )
+        if args.as_json:
+            print(json.dumps(verdict, indent=2, ensure_ascii=False))
+        else:
+            status = "PASS" if passed else "FAIL"
+            print(f"[wannado-drl Verify Gate: {status}] out={Path(args.out_dir).resolve()}")
+            if verdict.get("stage_failed"):
+                print(f"  Stage Failed: {verdict['stage_failed']}")
+            if verdict.get("errors"):
+                for err in verdict["errors"]:
+                    print(f"  Error: {err}")
+            for aid, info in (verdict.get("algorithms") or {}).items():
+                st = info["seed_stats"]
+                print(
+                    f"  - {aid}: IQM={st['iqm']:.2f} [{st.get('iqm_ci_low', st['iqm']):.2f}, "
+                    f"{st.get('iqm_ci_high', st['iqm']):.2f}], audit_passed={info['audit_passed']}, flags={info['red_flags']}"
+                )
+        return 0 if passed else 1
 
     if args.command == "init-agent":
         written = install_agent_kit(project_dir=args.project_dir, ide=args.ide)

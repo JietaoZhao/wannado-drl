@@ -15,20 +15,15 @@ Original single-file modular implementation for wannado-drl.
 
 from __future__ import annotations
 
-import time
-from dataclasses import asdict, dataclass
+from dataclasses import dataclass
 from typing import Any
 
-import numpy as np
 import torch
 import torch.nn.functional as F
 
-from wannado.drl.core.buffers import ReplayBuffer
+from wannado.drl.core.algo_helpers import OnlineRunContext, run_value_based_loop
 from wannado.drl.core.networks import CategoricalQNetwork
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, hard_update, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
 
 META = AlgoMeta(
     id="c51",
@@ -92,12 +87,27 @@ class C51Config:
     buffer_size: int = 20_000
     batch_size: int = 64
     target_update_freq: int = 200
+    train_freq: int = 1
+    gradient_steps: int = 0
     eps_start: float = 1.0
     eps_end: float = 0.05
     exploration_fraction: float = 0.5
     hidden_dims: tuple[int, ...] = (128, 128)
+    num_envs: int = 1
+    vec_mode: str = "auto"
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
     normalize_obs: bool = False
+    normalize_reward: bool = False
     eval_episodes: int = 10
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    save_replay_buffer: bool = False
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     device: str = "auto"
     seed: int = 42
 
@@ -110,130 +120,85 @@ def train_c51(
 ) -> TrainResult:
     """Train Categorical Distributional DQN (C51) on any Discrete-action environment."""
     cfg = config or C51Config()
-    rng = set_global_seed(cfg.seed)
-    dev = resolve_device(cfg.device)
-    env = ensure_gym_env(env_or_factory)
-    if not env.is_discrete:
-        raise ValueError("c51 supports Discrete action spaces only.")
+    delta_z = (cfg.v_max - cfg.v_min) / max(1, cfg.n_atoms - 1)
 
-    q_net = CategoricalQNetwork(
-        env.obs_dim, env.action_dim, n_atoms=cfg.n_atoms, v_min=cfg.v_min, v_max=cfg.v_max, hidden_dims=cfg.hidden_dims
-    ).to(dev)
-    target_net = CategoricalQNetwork(
-        env.obs_dim, env.action_dim, n_atoms=cfg.n_atoms, v_min=cfg.v_min, v_max=cfg.v_max, hidden_dims=cfg.hidden_dims
-    ).to(dev)
-    hard_update(q_net, target_net)
-    optimizer = torch.optim.Adam(q_net.parameters(), lr=cfg.lr)
-    replay = ReplayBuffer(cfg.buffer_size, env.obs_dim, env.action_dim, discrete_action=True, device=dev)
-    obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
-    delta_z = (cfg.v_max - cfg.v_min) / (cfg.n_atoms - 1)
+    def _build(ctx: OnlineRunContext, dev: torch.device) -> tuple[Any, Any, dict[str, Any]]:
+        kw = {
+            "action_dim": int(ctx.env.action_dim),
+            "n_atoms": int(cfg.n_atoms),
+            "v_min": float(cfg.v_min),
+            "v_max": float(cfg.v_max),
+            "hidden_dims": list(cfg.hidden_dims),
+            "extractor_type": cfg.extractor_type,
+            "extractor_kwargs": cfg.extractor_kwargs,
+        }
+        q_net = CategoricalQNetwork(
+            ctx.env.obs_spec,
+            ctx.env.action_dim,
+            n_atoms=cfg.n_atoms,
+            v_min=cfg.v_min,
+            v_max=cfg.v_max,
+            hidden_dims=cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        target_net = CategoricalQNetwork(
+            ctx.env.obs_spec,
+            ctx.env.action_dim,
+            n_atoms=cfg.n_atoms,
+            v_min=cfg.v_min,
+            v_max=cfg.v_max,
+            hidden_dims=cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        return q_net, target_net, {"net_class": "CategoricalQNetwork", "init_kwargs": kw}
 
-    t0 = time.perf_counter()
-    obs, info = env.reset(seed=cfg.seed)
-    ep_ret = 0.0
-    ep_idx = 0
-    learning_curve: list[dict[str, float]] = []
-    kl_losses: list[float] = []
+    def _loss(
+        q_net: Any,
+        target_net: Any,
+        b_obs: Any,
+        b_act: torch.Tensor,
+        b_rew: torch.Tensor,
+        b_next: Any,
+        b_term: torch.Tensor,
+    ) -> tuple[torch.Tensor, float]:
+        bsz = int(b_act.shape[0])
+        dev = b_act.device
+        # [AI-Prompt Hook]: Categorical Bellman projection onto fixed [v_min, v_max] atom grid.
+        with torch.no_grad():
+            next_q_vals = target_net.get_q_values(b_next)
+            next_act = next_q_vals.argmax(dim=1)
+            next_probs = target_net.get_probs(b_next)[torch.arange(bsz, device=dev), next_act]
 
-    for step in range(1, cfg.total_timesteps + 1):
-        decay_steps = max(1.0, cfg.exploration_fraction * cfg.total_timesteps)
-        eps = max(cfg.eps_end, cfg.eps_start - (step / decay_steps) * (cfg.eps_start - cfg.eps_end))
-        if obs_rms is not None:
-            obs_rms.update(obs)
-            obs_proc = obs_rms.normalize(obs)
-        else:
-            obs_proc = obs
+            tz = b_rew.unsqueeze(1) + cfg.gamma * (1.0 - b_term.unsqueeze(1)) * target_net.atoms.unsqueeze(0)
+            tz = tz.clamp(cfg.v_min, cfg.v_max)
+            b_idx = (tz - cfg.v_min) / delta_z
+            low = b_idx.floor().long().clamp(0, cfg.n_atoms - 1)
+            up = b_idx.ceil().long().clamp(0, cfg.n_atoms - 1)
 
-        mask = info.get("action_mask")
-        if float(rng.random()) < eps:
-            valid = np.flatnonzero(mask) if mask is not None else np.arange(env.action_dim)
-            act = int(rng.choice(valid if valid.size > 0 else np.arange(env.action_dim)))
-        else:
-            with torch.no_grad():
-                q_vals = q_net.get_q_values(torch.as_tensor(obs_proc, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0)
-                if mask is not None:
-                    m = torch.as_tensor(mask, device=dev, dtype=torch.bool).view_as(q_vals)
-                    if bool(m.any()):
-                        q_vals = q_vals.masked_fill(~m, -1e9)
-                act = int(torch.argmax(q_vals).item())
+            d_m_l = (up.float() + (low == up).float() - b_idx) * next_probs
+            d_m_u = (b_idx - low.float()) * next_probs
+            proj = torch.zeros_like(next_probs)
+            offset = (torch.arange(bsz, device=dev) * cfg.n_atoms).unsqueeze(1)
+            proj.view(-1).index_add_(0, (low + offset).view(-1), d_m_l.view(-1))
+            proj.view(-1).index_add_(0, (up + offset).view(-1), d_m_u.view(-1))
 
-        next_obs, reward, term, trunc, next_info = env.step(act)
-        ep_ret += float(reward)
-        next_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
-        replay.add(obs_proc, act, float(reward), next_proc, bool(term))
+        logits = q_net.get_logits(b_obs)
+        chosen_logits = logits[torch.arange(bsz, device=dev), b_act]
+        log_probs = F.log_softmax(chosen_logits, dim=-1)
+        loss = -(proj * log_probs).sum(dim=-1).mean()
+        chosen_q = (F.softmax(chosen_logits.detach(), dim=-1) * q_net.atoms).sum(dim=-1).mean()
+        return loss, float(chosen_q.item())
 
-        if term or trunc:
-            ep_idx += 1
-            if ep_idx % 5 == 0 or step == cfg.total_timesteps:
-                learning_curve.append({"step": float(step), "episode_return": float(ep_ret), "epsilon": float(eps)})
-            obs, info = env.reset(seed=cfg.seed + ep_idx)
-            ep_ret = 0.0
-        else:
-            obs, info = next_obs, next_info
-
-        if step >= cfg.learning_starts and replay.size >= cfg.batch_size:
-            b_obs, b_act, b_rew, b_next, b_term = replay.sample(cfg.batch_size, rng=rng)
-            # [AI-Prompt Hook]: Categorical Bellman projection onto fixed [v_min, v_max] atom grid.
-            with torch.no_grad():
-                next_q_vals = target_net.get_q_values(b_next)
-                next_act = next_q_vals.argmax(dim=1)
-                next_probs = target_net.get_probs(b_next)[torch.arange(cfg.batch_size, device=dev), next_act]
-
-                tz = b_rew.unsqueeze(1) + cfg.gamma * (1.0 - b_term.unsqueeze(1)) * target_net.atoms.unsqueeze(0)
-                tz = tz.clamp(cfg.v_min, cfg.v_max)
-                b_idx = (tz - cfg.v_min) / delta_z
-                low = b_idx.floor().long().clamp(0, cfg.n_atoms - 1)
-                up = b_idx.ceil().long().clamp(0, cfg.n_atoms - 1)
-
-                d_m_l = (up.float() + (low == up).float() - b_idx) * next_probs
-                d_m_u = (b_idx - low.float()) * next_probs
-                proj = torch.zeros_like(next_probs)
-                offset = (torch.arange(cfg.batch_size, device=dev) * cfg.n_atoms).unsqueeze(1)
-                proj.view(-1).index_add_(0, (low + offset).view(-1), d_m_l.view(-1))
-                proj.view(-1).index_add_(0, (up + offset).view(-1), d_m_u.view(-1))
-
-            logits = q_net.net(b_obs).view(cfg.batch_size, env.action_dim, cfg.n_atoms)
-            chosen_logits = logits[torch.arange(cfg.batch_size, device=dev), b_act]
-            log_probs = F.log_softmax(chosen_logits, dim=-1)
-            loss = -(proj * log_probs).sum(dim=-1).mean()
-
-            optimizer.zero_grad()
-            loss.backward()
-            torch.nn.utils.clip_grad_norm_(q_net.parameters(), 10.0)
-            optimizer.step()
-            kl_losses.append(float(loss.item()))
-
-        if step % cfg.target_update_freq == 0:
-            hard_update(q_net, target_net)
-
-    if obs_rms is not None:
-        obs_rms.freeze(True)
-
-    def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> int:
-        o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-        with eval_mode(q_net), torch.no_grad():
-            q_vals = q_net.get_q_values(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0)
-        mask_in = (info_in or {}).get("action_mask")
-        if mask_in is not None:
-            m = torch.as_tensor(mask_in, device=dev, dtype=torch.bool).view_as(q_vals)
-            if bool(m.any()):
-                q_vals = q_vals.masked_fill(~m, -1e9)
-        return int(torch.argmax(q_vals).item())
-
-    eval_target = eval_env_or_factory if eval_env_or_factory is not None else env
-    eval_stats = evaluate_policy_episodes(eval_target, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-
-    return TrainResult(
+    return run_value_based_loop(
+        env_or_factory,
         algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=cfg.total_timesteps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model=q_net,
-        config=asdict(cfg),
-        learning_curve=learning_curve,
-        train_diagnostics={"mean_cross_entropy_loss": float(np.mean(kl_losses)) if kl_losses else 0.0},
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,
+        cfg=cfg,
+        eval_env_or_factory=eval_env_or_factory,
+        build_q_nets=_build,
+        loss_fn=_loss,
+        use_get_q_values=True,
+        policy_kind="c51_q",
+        loss_metric_key="mean_cross_entropy_loss",
     )

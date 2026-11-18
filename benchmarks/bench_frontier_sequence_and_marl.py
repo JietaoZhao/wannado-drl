@@ -5,7 +5,7 @@ from __future__ import annotations
 import csv
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import matplotlib
 import numpy as np
@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from wannado.drl import (  # noqa: E402
+from wannado.drl import (
     ARPOConfig,
     DAPOConfig,
     GRPOConfig,
@@ -38,7 +38,7 @@ from wannado.drl import (  # noqa: E402
 
 
 class _TeamRelayEnv:
-    possible_agents = ["tx_0", "tx_1"]
+    possible_agents: ClassVar[list[str]] = ["tx_0", "tx_1"]
 
     def __init__(self) -> None:
         self._rng = np.random.default_rng(0)

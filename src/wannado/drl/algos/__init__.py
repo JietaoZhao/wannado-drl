@@ -1,7 +1,7 @@
-"""CleanRL-style single-file DRL algorithms organized into 7 authoritative families.
+"""CleanRL-style single-file DRL algorithms organized into 8 authoritative families.
 
 Supports PEP 562 lazy imports such as:
-    from wannado.drl.algos import train_ppo, train_sac, train_grpo
+    from wannado.drl.algos import train_ppo, train_sac, train_ppo_lagrangian
 """
 
 from __future__ import annotations
@@ -46,7 +46,14 @@ ALGO_EXPORTS: dict[str, tuple[str, str]] = {
     "SACConfig": ("wannado.drl.algos.actor_critic_off.sac_haarnoja2018", "SACConfig"),
     "train_hil_serl": ("wannado.drl.algos.actor_critic_off.hil_serl_luo2025", "train_hil_serl"),
     "HILSERLConfig": ("wannado.drl.algos.actor_critic_off.hil_serl_luo2025", "HILSERLConfig"),
-    # 5. Offline RL
+    # 5. Safe & risk-constrained RL
+    "train_ppo_lagrangian": ("wannado.drl.algos.safe_constrained.ppo_lagrangian_ray2019", "train_ppo_lagrangian"),
+    "PPOLagrangianConfig": ("wannado.drl.algos.safe_constrained.ppo_lagrangian_ray2019", "PPOLagrangianConfig"),
+    "train_sac_lagrangian": ("wannado.drl.algos.safe_constrained.sac_lagrangian_stooke2020", "train_sac_lagrangian"),
+    "SACLagrangianConfig": ("wannado.drl.algos.safe_constrained.sac_lagrangian_stooke2020", "SACLagrangianConfig"),
+    "train_cvar_ppo": ("wannado.drl.algos.safe_constrained.cvar_ppo_chow2018", "train_cvar_ppo"),
+    "CVaRPPOConfig": ("wannado.drl.algos.safe_constrained.cvar_ppo_chow2018", "CVaRPPOConfig"),
+    # 6. Offline RL
     "train_cql": ("wannado.drl.algos.offline_rl.cql_kumar2020", "train_cql"),
     "CQLConfig": ("wannado.drl.algos.offline_rl.cql_kumar2020", "CQLConfig"),
     "train_iql_offline": ("wannado.drl.algos.offline_rl.iql_kostrikov2022", "train_iql_offline"),
@@ -82,6 +89,7 @@ __all__ = [
     "ARPOConfig",
     "C51Config",
     "CQLConfig",
+    "CVaRPPOConfig",
     "DAPOConfig",
     "DDPGConfig",
     "DQNConfig",
@@ -97,10 +105,12 @@ __all__ = [
     "MonteCarloConfig",
     "PPOConfig",
     "PPOGRUConfig",
+    "PPOLagrangianConfig",
     "QLearningConfig",
     "QMIXConfig",
     "ReinforceConfig",
     "SACConfig",
+    "SACLagrangianConfig",
     "SarsaConfig",
     "TD3Config",
     "TRPOConfig",
@@ -109,6 +119,7 @@ __all__ = [
     "train_arpo",
     "train_c51",
     "train_cql",
+    "train_cvar_ppo",
     "train_dapo",
     "train_ddpg",
     "train_discorl",
@@ -124,10 +135,12 @@ __all__ = [
     "train_monte_carlo",
     "train_ppo",
     "train_ppo_gru",
+    "train_ppo_lagrangian",
     "train_q_learning",
     "train_qmix",
     "train_reinforce",
     "train_sac",
+    "train_sac_lagrangian",
     "train_sarsa",
     "train_td3",
     "train_trpo",

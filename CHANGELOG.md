@@ -2,6 +2,21 @@
 
 All notable changes to `wannado-drl` will be documented in this file.
 
+## [1.1.0] - 2026-11-18
+
+### Added
+- **Production Vectorized & Multimodal Training Engine (Phase A)**:
+  - True parallel `VectorizedEnvAdapter` (`SyncVectorEnv` / `AsyncVectorEnv` across Gymnasium `SameStep` & `NextStep` autoreset semantics) integrated across online rollouts and off-policy `ReplayBuffer` / `DualDemoReplayBuffer`.
+  - Multimodal `ObsSpec` & feature extractors (`NatureCNNExtractor` adaptive to small grids like `10x10` MinAtar, `ImpalaResNetExtractor`, permutation-invariant `SetAttentionExtractor` with entity masks, `DictCombinedExtractor`) with native `uint8` frame buffer storage and mask/image-aware `DictRunningMeanStd` + `RewardNormalizer`.
+  - Atomic `CheckpointManager`, standalone `PolicyBundle` / `load_policy()`, periodic eval/best-model persistence, and deterministic RNG/RMS/optimizer resume (`resume_from`).
+- **Irreplaceable MDP Causality Probes, *rliable* Statistics & External Policy Interop (Phase B)**:
+  - Pure-NumPy Stage 1 **Active MDP Probes (`audit/probes.py`)**: catches non-Markov future reward leakage (K-fold Granger permutation test), shifted-column lookahead clones (distinguishing causal `FrameStack` via reset signatures), exogenous future-innovation columns, high observation condition ratios ($\kappa$), reward volatility, and action-mask deadlocks before training begins.
+  - Pure-NumPy ***rliable* Statistical Rigor Suite (`core/utils.py`, `reporter/paper_reporter.py`)**: deterministic stratified bootstrap 95% CIs (`bootstrap_iqm_ci`, `bootstrap_mean_ci`), pairwise Mann-Whitney Probability of Improvement $P(A > B)$ with 95% CIs (`probability_of_improvement`), and score Performance Profiles (`compute_performance_profile`), rendered into 3-panel `results_overview.png`, Markdown tables, LaTeX tables, and JSON reports.
+  - **External Policy Adapter (`audit/external_adapter.py`)**: `wrap_external_policy()`, `evaluate_external_policy()`, `audit_external_policy()`, and `evaluate_drl_suite(..., external_policies=...)` natively audit Stable-Baselines3 (`.predict()` + `VecNormalize`), PyTorch `nn.Module`, saved `.pt`/`.zip` checkpoints, and arbitrary callables—automatically catching unfrozen SB3 `VecNormalize(training=True)` and continuous action saturation (`policy_action_saturation`). Also supports direct Gymnasium env ID strings (`"CartPole-v1"`, etc.) across `ensure_gym_env()`, `make_vec_env()`, and `preflight_env()`.
+- **Safe & Risk-Constrained RL Family (`8th Family`, 30 Total Algorithms) & Hard AI Verification Gate (Phase C)**:
+  - Added single-file `safe_constrained` algorithms: `ppo_lagrangian` (`ray2019benchmarking`, primal-dual cost critic & dual ascent), `sac_lagrangian` (`stooke2020responsive`, twin safety cost Q-critic + PID Lagrangian dual control), and `cvar_ppo` (`chow2018risk`, Rockafellar-Uryasev percentile tail-risk shaping), wired cleanly into `OPTIMIZATION_PROVENANCE`, `catalog/registry.json`, `recommend_algo_suite`, and `safety_constraint_budget_exceeded` rigor auditing.
+  - Added **`wannado-drl verify`** CLI subcommand (`verify_interface_gate`) enforcing Stage 1 Preflight + Future-Leakage Probes -> Training / External Policy Eval -> Stage 3 Rigor Audit -> Stage 4 artifacts (`verification_verdict.json`), returning strict non-zero exit status on any failed invariant, and streamlined `SKILL.md` / `AGENTS.md` templates around this machine-verifiable contract.
+
 ## [1.0.5] - 2026-11-17
 
 ### Changed

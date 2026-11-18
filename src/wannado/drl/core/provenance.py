@@ -300,6 +300,83 @@ OPTIMIZATION_PROVENANCE: dict[str, OptimizationProvenance] = {
             apa="Henderson, P., Islam, R., Bachman, P., Pineau, J., Precup, D., & Meger, D. (2018). Deep reinforcement learning that matters. AAAI.",
         ),
     ),
+    "primal_dual_lagrangian": OptimizationProvenance(
+        id="primal_dual_lagrangian",
+        name="Primal-Dual Constrained MDP Lagrangian Ascent",
+        role_plain="Pairs reward policy optimization with an adaptive dual multiplier lambda enforcing E[cost] <= limit.",
+        citation=AlgoCitation(
+            key="ray2019benchmarking",
+            title="Benchmarking Safe Exploration in Deep Reinforcement Learning",
+            authors="Alex Ray, Joshua Achiam, and Dario Amodei",
+            venue="OpenAI Technical Report",
+            year=2019,
+            url="https://cdn.openai.com/safexp-short.pdf",
+            bibtex=(
+                "@article{ray2019benchmarking,\n"
+                "  title={Benchmarking Safe Exploration in Deep Reinforcement Learning},\n"
+                "  author={Ray, Alex and Achiam, Joshua and Amodei, Dario},\n"
+                "  journal={OpenAI Technical Report},\n"
+                "  year={2019},\n"
+                "  url={https://cdn.openai.com/safexp-short.pdf}\n"
+                "}"
+            ),
+            ieee='A. Ray, J. Achiam, and D. Amodei, "Benchmarking safe exploration in deep reinforcement learning," OpenAI Technical Report, 2019.',
+            apa="Ray, A., Achiam, J., & Amodei, D. (2019). Benchmarking safe exploration in deep reinforcement learning. OpenAI Technical Report.",
+        ),
+    ),
+    "pid_lagrangian": OptimizationProvenance(
+        id="pid_lagrangian",
+        name="PID Lagrangian Constraint Control",
+        role_plain="Adds proportional, integral, and non-negative derivative damping to dual multiplier updates to stop safety oscillation.",
+        citation=AlgoCitation(
+            key="stooke2020responsive",
+            title="Responsive Safety in Reinforcement Learning by PID Lagrangian Methods",
+            authors="Adam Stooke, Joshua Achiam, and Pieter Abbeel",
+            venue="Proceedings of the 37th International Conference on Machine Learning (ICML), PMLR Vol. 119, pp. 9133-9143",
+            year=2020,
+            url="https://arxiv.org/abs/2007.03964",
+            bibtex=(
+                "@inproceedings{stooke2020responsive,\n"
+                "  title={Responsive Safety in Reinforcement Learning by PID Lagrangian Methods},\n"
+                "  author={Stooke, Adam and Achiam, Joshua and Abbeel, Pieter},\n"
+                "  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n"
+                "  volume={119},\n"
+                "  pages={9133--9143},\n"
+                "  year={2020},\n"
+                "  url={https://arxiv.org/abs/2007.03964}\n"
+                "}"
+            ),
+            ieee='A. Stooke, J. Achiam, and P. Abbeel, "Responsive safety in reinforcement learning by PID Lagrangian methods," in Proc. ICML, PMLR 119, pp. 9133-9143, 2020.',
+            apa="Stooke, A., Achiam, J., & Abbeel, P. (2020). Responsive safety in reinforcement learning by PID Lagrangian methods. ICML (PMLR 119).",
+        ),
+    ),
+    "cvar_tail_risk": OptimizationProvenance(
+        id="cvar_tail_risk",
+        name="Rockafellar-Uryasev CVaR Percentile Tail-Risk Surrogate",
+        role_plain="Optimizes lower-alpha Conditional Value-at-Risk instead of risk-neutral expectation to suppress catastrophic worst-case crashes.",
+        citation=AlgoCitation(
+            key="chow2018risk",
+            title="Risk-Constrained Reinforcement Learning with Percentile Risk Criteria",
+            authors="Yinlam Chow, Mohammad Ghavamzadeh, Lucas Janson, and Marco Pavone",
+            venue="Journal of Machine Learning Research (JMLR), Vol. 18, No. 167, pp. 1-51",
+            year=2018,
+            url="https://arxiv.org/abs/1512.01629",
+            bibtex=(
+                "@article{chow2018risk,\n"
+                "  title={Risk-Constrained Reinforcement Learning with Percentile Risk Criteria},\n"
+                "  author={Chow, Yinlam and Ghavamzadeh, Mohammad and Janson, Lucas and Pavone, Marco},\n"
+                "  journal={Journal of Machine Learning Research},\n"
+                "  volume={18},\n"
+                "  number={167},\n"
+                "  pages={1--51},\n"
+                "  year={2018},\n"
+                "  url={https://arxiv.org/abs/1512.01629}\n"
+                "}"
+            ),
+            ieee='Y. Chow, M. Ghavamzadeh, L. Janson, and M. Pavone, "Risk-constrained reinforcement learning with percentile risk criteria," JMLR, vol. 18, no. 167, pp. 1-51, 2018.',
+            apa="Chow, Y., Ghavamzadeh, M., Janson, L., & Pavone, M. (2018). Risk-constrained reinforcement learning with percentile risk criteria. JMLR, 18(167).",
+        ),
+    ),
 }
 
 # Static mapping from built-in algo_id -> default structural optimizations baked into that implementation
@@ -316,9 +393,12 @@ ALGO_DEFAULT_OPTIMIZATIONS: dict[str, tuple[str, ...]] = {
     "trpo": ("gae", "orthogonal_init_and_clip"),
     "ppo": ("gae", "orthogonal_init_and_clip"),
     "ppo_gru": ("gae", "orthogonal_init_and_clip", "gru_memory"),
+    "ppo_lagrangian": ("gae", "orthogonal_init_and_clip", "primal_dual_lagrangian"),
+    "cvar_ppo": ("gae", "orthogonal_init_and_clip", "cvar_tail_risk"),
     "ddpg": (),
     "td3": ("clipped_double_q",),
     "sac": ("clipped_double_q",),
+    "sac_lagrangian": ("clipped_double_q", "pid_lagrangian"),
     "hil_serl": ("clipped_double_q", "rlpd_symmetric_replay", "layer_norm_critic"),
     "cql": ("clipped_double_q",),
     "iql_offline": ("clipped_double_q",),

@@ -1,6 +1,6 @@
 {
   "schema_version": "1.0",
-  "count": 27,
+  "count": 30,
   "algorithms": [
     {
       "id": "ddpg",
@@ -1283,6 +1283,295 @@
             "bibtex": "@inproceedings{cho2014learning,\n  title={Learning Phrase Representations using RNN Encoder-Decoder for Statistical Machine Translation},\n  author={Cho, Kyunghyun and van Merri{\\\"e}nboer, Bart and Gulcehre, Caglar and Bahdanau, Dzmitry and Bougares, Fethi and Schwenk, Holger and Bengio, Yoshua},\n  booktitle={Proceedings of EMNLP},\n  year={2014},\n  url={https://arxiv.org/abs/1406.1078}\n}",
             "ieee": "K. Cho et al., \"Learning phrase representations using RNN encoder-decoder for statistical machine translation,\" in Proc. EMNLP, 2014.",
             "apa": "Cho, K., van Merrienboer, B., Gulcehre, C., Bahdanau, D., Bougares, F., Schwenk, H., & Bengio, Y. (2014). Learning phrase representations using RNN encoder-decoder for statistical machine translation. EMNLP."
+          }
+        }
+      ]
+    },
+    {
+      "id": "cvar_ppo",
+      "name": "CVaR-PPO (Percentile Tail-Risk PPO)",
+      "family": "safe_constrained",
+      "paradigm": "on_policy",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "finance",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "ppo",
+      "diff_from_parent": "Replaces pure expected-return advantage with Rockafellar-Uryasev CVaR tail-risk utility shaping across the worst alpha outcomes.",
+      "summary_plain": "Risk-averse PPO optimizing the worst-alpha% outcomes (CVaR) rather than risk-neutral average return — suppresses heavy-tail crashes.",
+      "when_to_use": "Finance, portfolio drawdowns, reliability/QoS SLA tails, or any task where occasional catastrophic crashes outweigh slightly higher average rewards.",
+      "when_not_to_use": "Pure deterministic reward maximization (`ppo`) or hard cumulative cost budgets `E[cost] <= d` (`ppo_lagrangian`).",
+      "hyperparam_intuition": {
+        "cvar_alpha": "Worst-case quantile fraction focused by CVaR (e.g., 0.20 focuses on the worst 20% trajectories).",
+        "mean_mix": "Trade-off between risk-neutral mean return (1.0) and pure worst-alpha CVaR (0.0).",
+        "nu_ema": "Exponential moving average rate updating the empirical alpha-quantile Value-at-Risk threshold nu."
+      },
+      "extension_hooks": [
+        "Add explicit per-step `info['cost']` dual budget constraint -> `ppo_lagrangian`",
+        "Lower `cvar_alpha` (e.g. 0.1) and set `mean_mix=0.05` for strict worst-case drawdown defense"
+      ],
+      "module_path": "wannado.drl.algos.safe_constrained.cvar_ppo_chow2018",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip",
+        "cvar_tail_risk"
+      ],
+      "citation": {
+        "key": "chow2018risk",
+        "title": "Risk-Constrained Reinforcement Learning with Percentile Risk Criteria",
+        "authors": "Yinlam Chow, Mohammad Ghavamzadeh, Lucas Janson, and Marco Pavone",
+        "venue": "Journal of Machine Learning Research (JMLR), Vol. 18, No. 167, pp. 1-51",
+        "year": 2018,
+        "url": "https://arxiv.org/abs/1512.01629",
+        "bibtex": "@article{chow2018risk,\n  title={Risk-Constrained Reinforcement Learning with Percentile Risk Criteria},\n  author={Chow, Yinlam and Ghavamzadeh, Mohammad and Janson, Lucas and Pavone, Marco},\n  journal={Journal of Machine Learning Research},\n  volume={18},\n  number={167},\n  pages={1--51},\n  year={2018},\n  url={https://arxiv.org/abs/1512.01629}\n}",
+        "ieee": "Y. Chow, M. Ghavamzadeh, L. Janson, and M. Pavone, \"Risk-constrained reinforcement learning with percentile risk criteria,\" JMLR, vol. 18, no. 167, pp. 1-51, 2018.",
+        "apa": "Chow, Y., Ghavamzadeh, M., Janson, L., & Pavone, M. (2018). Risk-constrained reinforcement learning with percentile risk criteria. JMLR, 18(167)."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        },
+        {
+          "id": "cvar_tail_risk",
+          "name": "Rockafellar-Uryasev CVaR Percentile Tail-Risk Surrogate",
+          "role_plain": "Optimizes lower-alpha Conditional Value-at-Risk instead of risk-neutral expectation to suppress catastrophic worst-case crashes.",
+          "citation": {
+            "key": "chow2018risk",
+            "title": "Risk-Constrained Reinforcement Learning with Percentile Risk Criteria",
+            "authors": "Yinlam Chow, Mohammad Ghavamzadeh, Lucas Janson, and Marco Pavone",
+            "venue": "Journal of Machine Learning Research (JMLR), Vol. 18, No. 167, pp. 1-51",
+            "year": 2018,
+            "url": "https://arxiv.org/abs/1512.01629",
+            "bibtex": "@article{chow2018risk,\n  title={Risk-Constrained Reinforcement Learning with Percentile Risk Criteria},\n  author={Chow, Yinlam and Ghavamzadeh, Mohammad and Janson, Lucas and Pavone, Marco},\n  journal={Journal of Machine Learning Research},\n  volume={18},\n  number={167},\n  pages={1--51},\n  year={2018},\n  url={https://arxiv.org/abs/1512.01629}\n}",
+            "ieee": "Y. Chow, M. Ghavamzadeh, L. Janson, and M. Pavone, \"Risk-constrained reinforcement learning with percentile risk criteria,\" JMLR, vol. 18, no. 167, pp. 1-51, 2018.",
+            "apa": "Chow, Y., Ghavamzadeh, M., Janson, L., & Pavone, M. (2018). Risk-constrained reinforcement learning with percentile risk criteria. JMLR, 18(167)."
+          }
+        }
+      ]
+    },
+    {
+      "id": "ppo_lagrangian",
+      "name": "PPO-Lagrangian (Primal-Dual CMDP)",
+      "family": "safe_constrained",
+      "paradigm": "on_policy",
+      "tier": "S",
+      "on_policy": true,
+      "sample_efficiency": "medium",
+      "action_spaces": [
+        "discrete",
+        "continuous"
+      ],
+      "env_modalities": [
+        "discrete_control",
+        "continuous_control",
+        "wireless",
+        "custom_sim"
+      ],
+      "supports_action_mask": true,
+      "supports_recurrent": false,
+      "parent_id": "ppo",
+      "diff_from_parent": "Adds separate Cost Critic V_C(s), cost GAE advantage, and primal-dual Lagrange multiplier ascent for safety constraints.",
+      "summary_plain": "Constrained PPO that maximizes reward subject to hard safety, power, or violation budgets via adaptive Lagrange penalties.",
+      "when_to_use": "Discrete or continuous control with explicit per-step `info['cost']` or violation limits where penalties cannot be tuned once statically.",
+      "when_not_to_use": "Slow continuous simulators needing off-policy replay (`sac_lagrangian`) or unconstrained reward maximization (`ppo`).",
+      "hyperparam_intuition": {
+        "cost_limit": "Target maximum expected cumulative constraint cost per episode (budget d).",
+        "lagrange_lr": "Dual ascent step size raising penalty weight lambda whenever episode cost > cost_limit.",
+        "init_lambda": "Initial safety multiplier balancing reward vs constraint satisfaction.",
+        "cost_gamma": "Discount horizon for future constraint violations."
+      },
+      "extension_hooks": [
+        "Swap to off-policy replay + PID dual control for continuous Box tasks -> `sac_lagrangian`",
+        "Shape tail-risk quantiles instead of mean constraint cost -> `cvar_ppo`"
+      ],
+      "module_path": "wannado.drl.algos.safe_constrained.ppo_lagrangian_ray2019",
+      "default_optimizations": [
+        "gae",
+        "orthogonal_init_and_clip",
+        "primal_dual_lagrangian"
+      ],
+      "citation": {
+        "key": "ray2019benchmarking",
+        "title": "Benchmarking Safe Exploration in Deep Reinforcement Learning",
+        "authors": "Alex Ray, Joshua Achiam, and Dario Amodei",
+        "venue": "OpenAI Technical Report",
+        "year": 2019,
+        "url": "https://cdn.openai.com/safexp-short.pdf",
+        "bibtex": "@article{ray2019benchmarking,\n  title={Benchmarking Safe Exploration in Deep Reinforcement Learning},\n  author={Ray, Alex and Achiam, Joshua and Amodei, Dario},\n  journal={OpenAI Technical Report},\n  year={2019},\n  url={https://cdn.openai.com/safexp-short.pdf}\n}",
+        "ieee": "A. Ray, J. Achiam, and D. Amodei, \"Benchmarking safe exploration in deep reinforcement learning,\" OpenAI Technical Report, 2019.",
+        "apa": "Ray, A., Achiam, J., & Amodei, D. (2019). Benchmarking safe exploration in deep reinforcement learning. OpenAI Technical Report."
+      },
+      "optimization_citations": [
+        {
+          "id": "gae",
+          "name": "Generalized Advantage Estimation (GAE)",
+          "role_plain": "Exponentially weighted lambda-return advantage estimator balancing TD bias vs Monte Carlo variance.",
+          "citation": {
+            "key": "schulman2016high",
+            "title": "High-Dimensional Continuous Control Using Generalized Advantage Estimation",
+            "authors": "John Schulman, Philipp Moritz, Sergey Levine, Michael I. Jordan, and Pieter Abbeel",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2016,
+            "url": "https://arxiv.org/abs/1506.02438",
+            "bibtex": "@inproceedings{schulman2016high,\n  title={High-Dimensional Continuous Control Using Generalized Advantage Estimation},\n  author={Schulman, John and Moritz, Philipp and Levine, Sergey and Jordan, Michael I. and Abbeel, Pieter},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2016},\n  url={https://arxiv.org/abs/1506.02438}\n}",
+            "ieee": "J. Schulman, P. Moritz, S. Levine, M. I. Jordan, and P. Abbeel, \"High-dimensional continuous control using generalized advantage estimation,\" in Proc. ICLR, 2016.",
+            "apa": "Schulman, J., Moritz, P., Levine, S., Jordan, M. I., & Abbeel, P. (2016). High-dimensional continuous control using generalized advantage estimation. ICLR."
+          }
+        },
+        {
+          "id": "orthogonal_init_and_clip",
+          "name": "Orthogonal Layer Initialization, LR Annealing & Global Grad Clipping",
+          "role_plain": "Code-level policy-gradient stabilization practices (orthogonal init, gradient clipping, linear LR decay).",
+          "citation": {
+            "key": "engstrom2020implementation",
+            "title": "Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO",
+            "authors": "Logan Engstrom, Andrew Ilyas, Shibani Santurkar, Dimitris Tsipras, Firdaus Janoos, Larry Rudolph, and Aleksander Madry",
+            "venue": "International Conference on Learning Representations (ICLR)",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2005.12729",
+            "bibtex": "@inproceedings{engstrom2020implementation,\n  title={Implementation Matters in Deep Policy Gradients: A Case Study on PPO and TRPO},\n  author={Engstrom, Logan and Ilyas, Andrew and Santurkar, Shibani and Tsipras, Dimitris and Janoos, Firdaus and Rudolph, Larry and M{\\k{a}}dry, Aleksander},\n  booktitle={International Conference on Learning Representations (ICLR)},\n  year={2020},\n  url={https://arxiv.org/abs/2005.12729}\n}",
+            "ieee": "L. Engstrom et al., \"Implementation matters in deep policy gradients: A case study on PPO and TRPO,\" in Proc. ICLR, 2020.",
+            "apa": "Engstrom, L., Ilyas, A., Santurkar, S., Tsipras, D., Janoos, F., Rudolph, L., & Madry, A. (2020). Implementation matters in deep policy gradients: A case study on PPO and TRPO. ICLR."
+          }
+        },
+        {
+          "id": "primal_dual_lagrangian",
+          "name": "Primal-Dual Constrained MDP Lagrangian Ascent",
+          "role_plain": "Pairs reward policy optimization with an adaptive dual multiplier lambda enforcing E[cost] <= limit.",
+          "citation": {
+            "key": "ray2019benchmarking",
+            "title": "Benchmarking Safe Exploration in Deep Reinforcement Learning",
+            "authors": "Alex Ray, Joshua Achiam, and Dario Amodei",
+            "venue": "OpenAI Technical Report",
+            "year": 2019,
+            "url": "https://cdn.openai.com/safexp-short.pdf",
+            "bibtex": "@article{ray2019benchmarking,\n  title={Benchmarking Safe Exploration in Deep Reinforcement Learning},\n  author={Ray, Alex and Achiam, Joshua and Amodei, Dario},\n  journal={OpenAI Technical Report},\n  year={2019},\n  url={https://cdn.openai.com/safexp-short.pdf}\n}",
+            "ieee": "A. Ray, J. Achiam, and D. Amodei, \"Benchmarking safe exploration in deep reinforcement learning,\" OpenAI Technical Report, 2019.",
+            "apa": "Ray, A., Achiam, J., & Amodei, D. (2019). Benchmarking safe exploration in deep reinforcement learning. OpenAI Technical Report."
+          }
+        }
+      ]
+    },
+    {
+      "id": "sac_lagrangian",
+      "name": "SAC-Lagrangian (PID Safe SAC)",
+      "family": "safe_constrained",
+      "paradigm": "off_policy",
+      "tier": "S",
+      "on_policy": false,
+      "sample_efficiency": "very_high",
+      "action_spaces": [
+        "continuous"
+      ],
+      "env_modalities": [
+        "continuous_control",
+        "custom_sim"
+      ],
+      "supports_action_mask": false,
+      "supports_recurrent": false,
+      "parent_id": "sac",
+      "diff_from_parent": "Adds twin Safety Cost Q-Critic Q_C(s,a) + Stooke et al. (2020) PID Lagrangian dual controller.",
+      "summary_plain": "High-sample-efficiency continuous Safe RL using PID feedback on safety constraint violations to eliminate oscillatory penalty tuning.",
+      "when_to_use": "Continuous Box control with safety budgets (`info['cost']`) and costly simulators requiring off-policy sample efficiency.",
+      "when_not_to_use": "Discrete/masked action spaces (`ppo_lagrangian`) or unconstrained continuous tasks (`sac`).",
+      "hyperparam_intuition": {
+        "cost_limit": "Episode constraint budget d (E[sum cost] <= cost_limit).",
+        "pid_kp": "Proportional reaction gain to immediate violation (J_C - cost_limit).",
+        "pid_ki": "Integral accumulation gain (clamped >= 0) tracking steady-state shadow price.",
+        "pid_kd": "Derivative overshoot damping reacting only to rising cost slopes."
+      },
+      "extension_hooks": [
+        "Add discrete/masked support + on-policy GAE cost critic -> `ppo_lagrangian`",
+        "Add offline demo symmetric sampling (`DualDemoReplayBuffer`) for zero-violation startup"
+      ],
+      "module_path": "wannado.drl.algos.safe_constrained.sac_lagrangian_stooke2020",
+      "default_optimizations": [
+        "clipped_double_q",
+        "pid_lagrangian"
+      ],
+      "citation": {
+        "key": "stooke2020responsive",
+        "title": "Responsive Safety in Reinforcement Learning by PID Lagrangian Methods",
+        "authors": "Adam Stooke, Joshua Achiam, and Pieter Abbeel",
+        "venue": "Proceedings of the 37th International Conference on Machine Learning (ICML), PMLR Vol. 119, pp. 9133-9143",
+        "year": 2020,
+        "url": "https://arxiv.org/abs/2007.03964",
+        "bibtex": "@inproceedings{stooke2020responsive,\n  title={Responsive Safety in Reinforcement Learning by PID Lagrangian Methods},\n  author={Stooke, Adam and Achiam, Joshua and Abbeel, Pieter},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={119},\n  pages={9133--9143},\n  year={2020},\n  url={https://arxiv.org/abs/2007.03964}\n}",
+        "ieee": "A. Stooke, J. Achiam, and P. Abbeel, \"Responsive safety in reinforcement learning by PID Lagrangian methods,\" in Proc. ICML, PMLR 119, pp. 9133-9143, 2020.",
+        "apa": "Stooke, A., Achiam, J., & Abbeel, P. (2020). Responsive safety in reinforcement learning by PID Lagrangian methods. ICML (PMLR 119)."
+      },
+      "optimization_citations": [
+        {
+          "id": "clipped_double_q",
+          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
+          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
+          "citation": {
+            "key": "fujimoto2018addressing",
+            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
+            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
+            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
+            "year": 2018,
+            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
+            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
+            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
+            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
+          }
+        },
+        {
+          "id": "pid_lagrangian",
+          "name": "PID Lagrangian Constraint Control",
+          "role_plain": "Adds proportional, integral, and non-negative derivative damping to dual multiplier updates to stop safety oscillation.",
+          "citation": {
+            "key": "stooke2020responsive",
+            "title": "Responsive Safety in Reinforcement Learning by PID Lagrangian Methods",
+            "authors": "Adam Stooke, Joshua Achiam, and Pieter Abbeel",
+            "venue": "Proceedings of the 37th International Conference on Machine Learning (ICML), PMLR Vol. 119, pp. 9133-9143",
+            "year": 2020,
+            "url": "https://arxiv.org/abs/2007.03964",
+            "bibtex": "@inproceedings{stooke2020responsive,\n  title={Responsive Safety in Reinforcement Learning by PID Lagrangian Methods},\n  author={Stooke, Adam and Achiam, Joshua and Abbeel, Pieter},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={119},\n  pages={9133--9143},\n  year={2020},\n  url={https://arxiv.org/abs/2007.03964}\n}",
+            "ieee": "A. Stooke, J. Achiam, and P. Abbeel, \"Responsive safety in reinforcement learning by PID Lagrangian methods,\" in Proc. ICML, PMLR 119, pp. 9133-9143, 2020.",
+            "apa": "Stooke, A., Achiam, J., & Abbeel, P. (2020). Responsive safety in reinforcement learning by PID Lagrangian methods. ICML (PMLR 119)."
           }
         }
       ]

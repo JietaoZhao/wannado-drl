@@ -11,8 +11,9 @@ import torch
 import torch.nn.functional as F
 
 from wannado.drl.core.networks import QNetwork, TwinQCritic
+from wannado.drl.core.obs_spec import obs_to_tensor, slice_obs
 from wannado.drl.core.utils import hard_update, polyak_update, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import OfflineTransitionDataset
+from wannado.drl.core.wrappers import DictRunningMeanStd, OfflineTransitionDataset
 
 
 def compute_cvar(returns: Sequence[float] | np.ndarray, *, alpha: float = 0.05) -> float:
@@ -232,7 +233,7 @@ def evaluate_offline_wis(
         eval_probs = np.zeros(n, dtype=np.float64)
         for i in range(n):
             info_i = {"action_mask": masks_raw[i]} if masks_raw is not None else {}
-            pred = int(np.asarray(policy_fn(dataset.obs[i], info_i)).item())
+            pred = int(np.asarray(policy_fn(slice_obs(dataset.obs, i), info_i)).item())
             if int(dataset.actions[i]) == pred:
                 eval_probs[i] = 1.0 - soft_eps
             else:
@@ -240,7 +241,7 @@ def evaluate_offline_wis(
         step_rhos = np.clip(eval_probs / b_probs, 0.0, float(clip_rho))
     else:
         act_mat = dataset.actions.astype(np.float64)
-        pred_acts = np.asarray([np.asarray(policy_fn(dataset.obs[i], {}), dtype=np.float64).reshape(-1) for i in range(n)])
+        pred_acts = np.asarray([np.asarray(policy_fn(slice_obs(dataset.obs, i), {}), dtype=np.float64).reshape(-1) for i in range(n)])
         scale = np.maximum(np.std(act_mat, axis=0), 0.1)
         dist_sq = np.mean(((pred_acts - act_mat) / scale) ** 2, axis=-1)
         if b_probs_raw is not None:
@@ -304,10 +305,12 @@ def evaluate_offline_fqe(
 
     rng = set_global_seed(seed)
     dev = resolve_device(device)
-    obs_mean = np.mean(dataset.obs, axis=0, keepdims=True)
-    obs_std = np.maximum(np.std(dataset.obs, axis=0, keepdims=True), 1e-4)
-    obs_norm = ((dataset.obs - obs_mean) / obs_std).astype(np.float32)
-    next_obs_norm = ((dataset.next_obs - obs_mean) / obs_std).astype(np.float32)
+    obs_spec = dataset.resolved_obs_spec
+    obs_rms = DictRunningMeanStd(obs_spec)
+    obs_rms.update(dataset.obs)
+    obs_rms.freeze(True)
+    obs_norm = obs_rms.normalize(dataset.obs)
+    next_obs_norm = obs_rms.normalize(dataset.next_obs)
 
     episodes = _split_dataset_episodes(dataset)
     init_indices = np.asarray([int(ep[0]) for ep in episodes], dtype=np.int64)
@@ -320,25 +323,25 @@ def evaluate_offline_fqe(
     next_actions_raw = np.zeros_like(dataset.actions)
     for i in range(n):
         info_next = {"action_mask": next_masks_raw[i]} if next_masks_raw is not None else {}
-        act_pred = policy_fn(dataset.next_obs[i], info_next)
+        act_pred = policy_fn(slice_obs(dataset.next_obs, i), info_next)
         next_actions_raw[i] = int(np.asarray(act_pred).item()) if dataset.is_discrete else np.asarray(act_pred, dtype=np.float32)
 
     bs = min(batch_size, n)
     mses: list[float] = []
 
     if dataset.is_discrete:
-        q_net = QNetwork(dataset.obs_dim, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
-        target_net = QNetwork(dataset.obs_dim, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
+        q_net = QNetwork(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
+        target_net = QNetwork(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
         hard_update(q_net, target_net)
         opt = torch.optim.Adam(q_net.parameters(), lr=lr)
 
         b_na_all = next_actions_raw.astype(np.int64).reshape(-1)
         for _ in range(num_steps):
             idx = rng.integers(0, n, size=bs)
-            bo = torch.as_tensor(obs_norm[idx], device=dev, dtype=torch.float32)
+            bo = obs_to_tensor(slice_obs(obs_norm, idx), obs_spec, dev, add_batch_dim=False)
             ba = torch.as_tensor(dataset.actions[idx].astype(np.int64).reshape(-1), device=dev, dtype=torch.long)
             br = torch.as_tensor(dataset.rewards[idx], device=dev, dtype=torch.float32)
-            bno = torch.as_tensor(next_obs_norm[idx], device=dev, dtype=torch.float32)
+            bno = obs_to_tensor(slice_obs(next_obs_norm, idx), obs_spec, dev, add_batch_dim=False)
             bna = torch.as_tensor(b_na_all[idx], device=dev, dtype=torch.long)
             bt = torch.as_tensor(dataset.terminateds[idx], device=dev, dtype=torch.float32)
 
@@ -357,36 +360,36 @@ def evaluate_offline_fqe(
         masks_raw = dataset.extra.get("action_masks")
         init_acts = np.asarray(
             [
-                int(np.asarray(policy_fn(dataset.obs[i], {"action_mask": masks_raw[i]} if masks_raw is not None else {})).item())
+                int(np.asarray(policy_fn(slice_obs(dataset.obs, int(i)), {"action_mask": masks_raw[i]} if masks_raw is not None else {})).item())
                 for i in init_indices
             ],
             dtype=np.int64,
         )
         all_acts = np.asarray(
             [
-                int(np.asarray(policy_fn(dataset.obs[i], {"action_mask": masks_raw[i]} if masks_raw is not None else {})).item())
+                int(np.asarray(policy_fn(slice_obs(dataset.obs, i), {"action_mask": masks_raw[i]} if masks_raw is not None else {})).item())
                 for i in range(min(n, 512))
             ],
             dtype=np.int64,
         )
         with torch.no_grad():
-            q_init = q_net(torch.as_tensor(obs_norm[init_indices], device=dev, dtype=torch.float32))
+            q_init = q_net(obs_to_tensor(slice_obs(obs_norm, init_indices), obs_spec, dev, add_batch_dim=False))
             init_vals = q_init.gather(1, torch.as_tensor(init_acts, device=dev).unsqueeze(1)).squeeze(1).cpu().numpy()
-            q_all = q_net(torch.as_tensor(obs_norm[: len(all_acts)], device=dev, dtype=torch.float32))
+            q_all = q_net(obs_to_tensor(slice_obs(obs_norm, slice(0, len(all_acts))), obs_spec, dev, add_batch_dim=False))
             mean_q = float(q_all.gather(1, torch.as_tensor(all_acts, device=dev).unsqueeze(1)).squeeze(1).mean().item())
     else:
-        q_net_c = TwinQCritic(dataset.obs_dim, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
-        target_net_c = TwinQCritic(dataset.obs_dim, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
+        q_net_c = TwinQCritic(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
+        target_net_c = TwinQCritic(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
         hard_update(q_net_c, target_net_c)
         opt_c = torch.optim.Adam(q_net_c.parameters(), lr=lr)
 
         b_na_c_all = next_actions_raw.astype(np.float32)
         for _ in range(num_steps):
             idx = rng.integers(0, n, size=bs)
-            bo = torch.as_tensor(obs_norm[idx], device=dev, dtype=torch.float32)
+            bo = obs_to_tensor(slice_obs(obs_norm, idx), obs_spec, dev, add_batch_dim=False)
             ba = torch.as_tensor(dataset.actions[idx].astype(np.float32), device=dev, dtype=torch.float32)
             br = torch.as_tensor(dataset.rewards[idx], device=dev, dtype=torch.float32).unsqueeze(-1)
-            bno = torch.as_tensor(next_obs_norm[idx], device=dev, dtype=torch.float32)
+            bno = obs_to_tensor(slice_obs(next_obs_norm, idx), obs_spec, dev, add_batch_dim=False)
             bna = torch.as_tensor(b_na_c_all[idx], device=dev, dtype=torch.float32)
             bt = torch.as_tensor(dataset.terminateds[idx], device=dev, dtype=torch.float32).unsqueeze(-1)
 
@@ -402,16 +405,16 @@ def evaluate_offline_fqe(
             polyak_update(q_net_c, target_net_c, 0.02)
             mses.append(float(loss.item()))
 
-        init_acts_c = np.asarray([np.asarray(policy_fn(dataset.obs[i], {}), dtype=np.float32) for i in init_indices])
-        all_acts_c = np.asarray([np.asarray(policy_fn(dataset.obs[i], {}), dtype=np.float32) for i in range(min(n, 512))])
+        init_acts_c = np.asarray([np.asarray(policy_fn(slice_obs(dataset.obs, int(i)), {}), dtype=np.float32) for i in init_indices])
+        all_acts_c = np.asarray([np.asarray(policy_fn(slice_obs(dataset.obs, i), {}), dtype=np.float32) for i in range(min(n, 512))])
         with torch.no_grad():
             iq1, iq2 = q_net_c(
-                torch.as_tensor(obs_norm[init_indices], device=dev, dtype=torch.float32),
+                obs_to_tensor(slice_obs(obs_norm, init_indices), obs_spec, dev, add_batch_dim=False),
                 torch.as_tensor(init_acts_c, device=dev, dtype=torch.float32),
             )
             init_vals = torch.min(iq1, iq2).squeeze(-1).cpu().numpy()
             aq1, aq2 = q_net_c(
-                torch.as_tensor(obs_norm[: len(all_acts_c)], device=dev, dtype=torch.float32),
+                obs_to_tensor(slice_obs(obs_norm, slice(0, len(all_acts_c))), obs_spec, dev, add_batch_dim=False),
                 torch.as_tensor(all_acts_c, device=dev, dtype=torch.float32),
             )
             mean_q = float(torch.min(aq1, aq2).mean().item())

@@ -97,15 +97,16 @@ class TestPackagingAndCatalogContracts(unittest.TestCase):
             self.assertIn("./adv_eval/", drl_skill)
             self.assertIn("./drl_lab/", adv_skill)
 
-    def test_all_27_algorithms_across_7_families_in_catalog(self) -> None:
+    def test_all_30_algorithms_across_8_families_in_catalog(self) -> None:
         discovered = discover_algo_metas()
-        self.assertEqual(len(discovered), 27)
+        self.assertEqual(len(discovered), 30)
         tree = get_taxonomy_tree()
         expected_families = {
             "tabular_classic",
             "value_based",
             "policy_gradient",
             "actor_critic_off",
+            "safe_constrained",
             "offline_rl",
             "multi_agent",
             "llm_and_discovered",
@@ -132,11 +133,11 @@ class TestPackagingAndCatalogContracts(unittest.TestCase):
                 self.assertIn(c["parent_id"], ids)
 
         # Check specific requested frontier & classic entries exist and cite accurately
-        for required_id in ("monte_carlo", "q_learning", "ppo", "sac", "hil_serl", "qmix", "mappo", "grpo", "dapo", "gspo", "arpo", "discorl"):
+        for required_id in ("monte_carlo", "q_learning", "ppo", "sac", "ppo_lagrangian", "sac_lagrangian", "cvar_ppo", "hil_serl", "qmix", "mappo", "grpo", "dapo", "gspo", "arpo", "discorl"):
             self.assertIn(required_id, ids)
 
         lineage = get_sota_lineage()
-        self.assertEqual(len(lineage), 27)
+        self.assertEqual(len(lineage), 30)
         bib = export_citations(["grpo", "dapo", "gspo", "arpo", "discorl", "hil_serl"], fmt="bibtex", include_audit_refs=True)
         self.assertIn("shao2024deepseekmath", bib)
         self.assertIn("yu2025dapo", bib)

@@ -13,14 +13,16 @@ from wannado.drl.core.wrappers import MultiAgentEnvAdapter, SequenceTaskEnv, Uni
 
 def evaluate_policy_episodes(
     env_or_factory: Any,
-    policy_fn: Callable[[np.ndarray, dict[str, Any]], Any],
+    policy_fn: Callable[[Any, dict[str, Any]], Any],
     *,
     num_episodes: int = 10,
     seed: int = 1000,
     max_steps_per_episode: int | None = None,
 ) -> EpisodeEvalStats:
     """Evaluate any policy callable deterministically across multiple episodes with sub-reward tracking."""
-    env: UniversalGymAdapter = ensure_gym_env(env_or_factory)
+    policy_spec = getattr(policy_fn, "obs_spec", None)
+    needs_structured = bool(policy_spec is not None and getattr(policy_spec, "kind", "vector") != "vector")
+    env: UniversalGymAdapter = ensure_gym_env(env_or_factory, structured_obs=needs_structured)
     returns: list[float] = []
     lengths: list[int] = []
     term_count = 0

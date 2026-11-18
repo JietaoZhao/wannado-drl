@@ -23,6 +23,7 @@ _FAMILY_LABELS: dict[str, str] = {
     "value_based": "Deep Value-Based Q-Learning (DQN Family)",
     "policy_gradient": "On-Policy & Recurrent Policy Gradient (PPO / POMDP)",
     "actor_critic_off": "Continuous Off-Policy & Human-in-the-Loop (SAC / HIL-SERL)",
+    "safe_constrained": "Safe & Risk-Constrained RL (CMDP / CVaR)",
     "offline_rl": "Offline / Batch RL",
     "multi_agent": "Multi-Agent CTDE Coordination (MARL)",
     "llm_and_discovered": "2024-2025 Sequence Reasoning & Meta-Discovered RL",
@@ -34,7 +35,7 @@ _FRONTIER_SOTA = {"ppo_gru", "hil_serl", "mappo", "maddpg", "dapo", "gspo", "arp
 
 def _get_package_version() -> str:
     pkg = sys.modules.get("wannado.drl")
-    return str(getattr(pkg, "__version__", "1.0.5"))
+    return str(getattr(pkg, "__version__", "1.1.0"))
 
 
 @dataclass
@@ -91,7 +92,7 @@ def get_sota_lineage(
     family: str | None = None,
     action_space: str | None = None,
 ) -> list[dict[str, Any]]:
-    """Trace pedagogical-to-frontier evolution chains across the 7 RL/DRL families."""
+    """Trace pedagogical-to-frontier evolution chains across the 8 RL/DRL families."""
     cards = query_catalog(family=family, action_space=action_space)
     by_id = {c["id"]: c for c in load_catalog()}
     children_map: dict[str, list[str]] = {}
@@ -161,10 +162,18 @@ def recommend_algo_suite(
     has_invalid_actions: bool = False,
     is_offline_only: bool = False,
     has_human_demos: bool = False,
+    has_constraints: bool = False,
+    risk_sensitive: bool = False,
     num_agents: int = 1,
     sim_ms_per_step: float | None = None,
 ) -> RecommendedAlgoSuite:
     """Match MDP constraints & simulator speed to a Baseline -> SOTA algorithm roster."""
+    if task_goal:
+        low_q = task_goal.lower()
+        if any(k in low_q for k in ("constraint", "cost_limit", "cmdp", "lagrangian", "hard safety", "safety budget")):
+            has_constraints = True
+        if any(k in low_q for k in ("cvar", "tail risk", "tail-risk", "risk-averse", "risk sensitive", "drawdown")):
+            risk_sensitive = True
     if task_goal and mdp_spec is None:
         _arch_q, act_q, off_q = _infer_query_context(task_goal)
         if act_q is not None and action_space == "discrete":
@@ -198,6 +207,34 @@ def recommend_algo_suite(
         rationale = (
             "Zero live interaction allowed: compare conservative Q-penalization (CQL) against in-sample expectile regression (IQL) "
             "to avoid out-of-distribution action hallucination."
+        )
+    elif has_constraints:
+        paradigm = "safe_constrained"
+        if action_space == "continuous":
+            algos = (
+                ["sac_lagrangian"]
+                if (goal == "sanity" or slow_sim)
+                else (["ppo_lagrangian", "sac_lagrangian"] if goal == "standard" else ["ppo", "ppo_lagrangian", "sac_lagrangian"])
+            )
+            rationale = (
+                "Hard safety/constraint budget (`info['cost'] <= cost_limit`): compare primal-dual PPO-Lagrangian against "
+                "PID-controlled off-policy SAC-Lagrangian for sample-efficient non-oscillatory constraint satisfaction."
+            )
+        else:
+            algos = ["ppo_lagrangian"] if goal == "sanity" else (["ppo", "ppo_lagrangian"] if goal == "standard" else ["ppo", "ppo_lagrangian", "cvar_ppo"])
+            rationale = (
+                "Discrete CMDP constraint budget (`info['cost'] <= cost_limit`): pair masked/discrete PPO baseline with "
+                "PPO-Lagrangian online dual ascent to enforce expected constraint limits."
+            )
+    elif risk_sensitive:
+        paradigm = "risk_sensitive"
+        if action_space == "continuous":
+            algos = ["cvar_ppo"] if goal == "sanity" else ["ppo", "sac", "cvar_ppo"]
+        else:
+            algos = ["cvar_ppo"] if goal == "sanity" else ["ppo", "cvar_ppo"]
+        rationale = (
+            "Tail-risk / drawdown sensitivity detected: pair risk-neutral baselines with Rockafellar-Uryasev CVaR-PPO "
+            "to explicitly optimize lower-alpha Conditional Value-at-Risk instead of average return alone."
         )
     elif num_agents > 1 or action_space.startswith("multi_agent"):
         paradigm = "multi_agent_ctde"
@@ -570,6 +607,24 @@ def explain_parameters(
             "IQM (Interquartile Mean)": "Drops the top 25% luckiest and bottom 25% worst random seeds, averaging the middle 50% so results aren't cherry-picked.",
         },
     }
+
+    is_tabular_only = bool(algo_set) and algo_set.issubset({"monte_carlo", "sarsa", "q_learning"})
+    if not is_tabular_only and not is_seq:
+        guide["algorithm_specific"]["engine_and_checkpoints"] = _knob(
+            parameter="num_envs / extractor_type / checkpoint_dir & eval_freq",
+            terminology="Vectorized Parallel Envs, Multimodal Encoder & Atomic Best-Model Checkpointing",
+            plain_analogy=(
+                "Like running N simulators simultaneously (`num_envs`) so training collects data N times faster, snapping in the right eyes for "
+                "pixels/sets/dicts (`extractor_type`), and auto-saving both the highest-scoring policy (`best_model.pt`) and a resumable snapshot (`last_checkpoint.pt`)."
+            ),
+            equivalent_to="`num_envs=4..8` runs parallel Gymnasium VectorEnv workers; `extractor_type='auto'` selects MLP, NatureCNN/IMPALA, SetAttention, or Dict fusion.",
+            if_higher_vs_lower="Higher `num_envs` accelerates rollout throughput on fast/vectorized sims; `eval_freq > 0` checkpoints peak policies without losing progress on crashes.",
+            options=[
+                {"num_envs": 1, "extractor_type": "auto", "label": "Single-env exact debug run (`num_envs=1`) — minimal CPU/RAM overhead"},
+                {"num_envs": 4, "extractor_type": "auto", "eval_freq": 5_000, "label": "Vectorized 4-worker run + periodic best-model checkpointing (`num_envs=4`) [Recommended]"},
+                {"num_envs": 8, "extractor_type": "impala", "eval_freq": 10_000, "label": "High-throughput 8-worker CNN/multimodal run (`num_envs=8`, `impala` ResNet)"},
+            ],
+        )
 
     if uses_epsilon:
         guide["algorithm_specific"]["epsilon_exploration"] = _knob(

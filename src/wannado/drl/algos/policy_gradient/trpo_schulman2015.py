@@ -24,17 +24,18 @@ import torch.nn.functional as F
 from torch import nn
 from torch.distributions import kl_divergence
 
-from wannado.drl.core.buffers import RolloutBuffer
-from wannado.drl.core.networks import (
-    ContinuousActorCritic,
-    DiscreteActorCritic,
-    MultiCategorical,
-    MultiDiscreteActorCritic,
+from wannado.drl.core.algo_helpers import (
+    build_actor_critic_for_env,
+    finalize_online_run,
+    maybe_periodic_hooks,
+    maybe_resume_online_run,
+    setup_online_run,
 )
+from wannado.drl.core.buffers import RolloutBuffer
+from wannado.drl.core.networks import ContinuousActorCritic, MultiCategorical
+from wannado.drl.core.obs_spec import obs_to_tensor, slice_obs
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, explained_variance, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
+from wannado.drl.core.utils import explained_variance, resolve_device, set_global_seed
 
 META = AlgoMeta(
     id="trpo",
@@ -98,6 +99,18 @@ class TRPOConfig:
     vf_iters: int = 5
     hidden_dims: tuple[int, ...] = (64, 64)
     normalize_obs: bool = False
+    normalize_reward: bool = False
+    num_envs: int = 1
+    vec_mode: str = "auto"
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     eval_episodes: int = 10
     device: str = "auto"
     seed: int = 42
@@ -141,60 +154,66 @@ def train_trpo(
     *,
     eval_env_or_factory: Any | None = None,
 ) -> TrainResult:
-    """Train Trust Region Policy Optimization (TRPO) on Discrete or Continuous envs."""
+    """Train Trust Region Policy Optimization (TRPO) with VectorEnv & multimodal encoders."""
     cfg = config or TRPOConfig()
-    set_global_seed(cfg.seed)
+    rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
-    env = ensure_gym_env(env_or_factory)
-
-    net: DiscreteActorCritic | MultiDiscreteActorCritic | ContinuousActorCritic
-    act_dtype: np.dtype[Any]
-    if env.is_discrete:
-        net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
-        actor_params = list(net.actor.parameters())
-        act_shape: tuple[int, ...] = ()
-        act_dtype = np.dtype(np.int64)
-    elif env.action_nvec is not None:
-        net = MultiDiscreteActorCritic(env.obs_dim, env.action_nvec, hidden_dims=cfg.hidden_dims).to(dev)
-        actor_params = list(net.actor.parameters())
-        act_shape = (len(env.action_nvec),)
-        act_dtype = np.dtype(np.int64)
-    else:
-        net = ContinuousActorCritic(
-            env.obs_dim,
-            env.action_dim,
-            hidden_dims=cfg.hidden_dims,
-            action_low=env.action_low,
-            action_high=env.action_high,
-        ).to(dev)
-        actor_params = list(net.actor_mean.parameters()) + [net.actor_logstd]
-        act_shape = (env.action_dim,)
-        act_dtype = np.dtype(np.float32)
-
+    ctx = setup_online_run(
+        env_or_factory,
+        num_envs=cfg.num_envs,
+        vec_mode=cfg.vec_mode,
+        extractor_type=cfg.extractor_type,
+        normalize_obs=cfg.normalize_obs,
+        normalize_reward=cfg.normalize_reward,
+        gamma=cfg.gamma,
+        checkpoint_dir=cfg.checkpoint_dir,
+        checkpoint_freq=cfg.checkpoint_freq,
+        eval_freq=cfg.eval_freq,
+        save_best_model=cfg.save_best_model,
+        keep_last_k=cfg.keep_last_k,
+        tb_log_dir=cfg.tb_log_dir,
+        eval_env_or_factory=eval_env_or_factory,
+        device=dev,
+    )
+    env, obs_rms, ret_rms = ctx.env, ctx.obs_rms, ctx.ret_rms
+    net, policy_spec, act_shape, act_dtype = build_actor_critic_for_env(
+        env,
+        hidden_dims=cfg.hidden_dims,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+        device=dev,
+    )
+    actor_params = net.actor_parameters()
     critic_opt = torch.optim.Adam(net.critic.parameters(), lr=cfg.vf_lr)
     buffer = RolloutBuffer(
         cfg.n_steps,
-        env.obs_dim,
+        env.obs_spec,
         act_shape,
         action_dtype=act_dtype,
         mask_dim=env.action_dim if env.is_discrete else None,
+        num_envs=env.num_envs,
+        batched=True,
     )
-    obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
+    cfg_dict = asdict(cfg)
+    models_map: dict[str, Any] = {"policy": net}
+    opts_map = {"critic": critic_opt}
 
+    steps, ep_idx, learning_curve = maybe_resume_online_run(
+        ctx, resume_from=cfg.resume_from, models=models_map, optimizers=opts_map, rng=rng
+    )
     t0 = time.perf_counter()
-    obs, info = env.reset(seed=cfg.seed)
-    ep_ret, ep_idx, steps = 0.0, 0, 0
-    learning_curve: list[dict[str, float]] = []
+    obs, mask_batch = env.reset_batch(seed=cfg.seed)
+    saw_action_mask = mask_batch is not None
     kl_hist, ent_hist, ev_hist = [], [], []
 
-    def _get_dist(b_o: torch.Tensor, b_m: torch.Tensor | None) -> Any:
+    def _get_dist(b_o: Any, b_m: torch.Tensor | None) -> Any:
         if env.is_discrete:
-            return net.get_dist(b_o, action_mask=b_m)  # type: ignore[call-arg]
+            return net.get_dist(b_o, action_mask=b_m)
         return net.get_dist(b_o)
 
     while steps < cfg.total_timesteps:
         buffer.reset()
-        last_done = False
+        last_dones = np.zeros((env.num_envs,), dtype=np.bool_)
         for _ in range(cfg.n_steps):
             if steps >= cfg.total_timesteps:
                 break
@@ -204,64 +223,59 @@ def train_trpo(
             else:
                 obs_proc = obs
 
-            obs_t = torch.as_tensor(obs_proc, device=dev, dtype=torch.float32).unsqueeze(0)
-            mask = info.get("action_mask")
-            mask_t = torch.as_tensor(mask, device=dev, dtype=torch.bool).unsqueeze(0) if mask is not None else None
+            obs_t = obs_to_tensor(obs_proc, env.obs_spec, dev, add_batch_dim=False)
+            if mask_batch is not None:
+                saw_action_mask = True
+            mask_t = torch.as_tensor(mask_batch, device=dev, dtype=torch.bool) if mask_batch is not None else None
             with torch.no_grad():
                 if env.is_discrete:
-                    act_t, lp_t, _, val_t = net.get_action_and_value(obs_t, action_mask=mask_t)  # type: ignore[call-arg]
-                    act_env: Any = int(act_t.item())
+                    act_t, lp_t, _, val_t = net.get_action_and_value(obs_t, action_mask=mask_t)
                 else:
                     act_t, lp_t, _, val_t = net.get_action_and_value(obs_t)
-                    act_env = act_t.squeeze(0).cpu().numpy()
+                act_env = act_t.cpu().numpy()
 
-            next_obs, reward, term, trunc, next_info = env.step(act_env)
-            ep_ret += float(reward)
-            steps += 1
-            step_reward = float(reward)
-            done_flag = bool(term or trunc)
-            if trunc and not term:
-                trunc_proc = obs_rms.normalize(next_obs) if obs_rms is not None else next_obs
+            sb = env.step_batch(act_env)
+            valid_count = int(np.sum(sb.valid_transition))
+            step_rewards = ret_rms.normalize_batch(sb.rewards, sb.dones) if ret_rms is not None else sb.rewards.copy()
+            trunc_mask = sb.valid_transition & sb.truncateds & (~sb.terminateds)
+            if np.any(trunc_mask):
+                trunc_raw = slice_obs(sb.final_obs, trunc_mask)
+                trunc_proc = obs_rms.normalize(trunc_raw) if obs_rms is not None else trunc_raw
                 with torch.no_grad():
-                    trunc_v = float(
-                        net.get_value(torch.as_tensor(trunc_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item()
-                    )
-                step_reward += cfg.gamma * trunc_v
+                    trunc_vals = net.get_value(obs_to_tensor(trunc_proc, env.obs_spec, dev)).cpu().numpy()
+                step_rewards[trunc_mask] += cfg.gamma * trunc_vals
 
-            buffer.add(
+            buffer.add_batch(
                 obs_proc,
                 act_env,
-                float(lp_t.item()),
-                step_reward,
-                bool(term),
-                float(val_t.item()),
-                action_mask=mask if mask is not None else (np.ones(env.action_dim, dtype=np.bool_) if env.is_discrete else None),
-                done=done_flag,
+                lp_t.cpu().numpy(),
+                step_rewards,
+                sb.terminateds,
+                val_t.cpu().numpy(),
+                action_masks=mask_batch
+                if mask_batch is not None
+                else (np.ones((env.num_envs, env.action_dim), dtype=np.bool_) if env.is_discrete else None),
+                dones=sb.dones,
+                valid_mask=sb.valid_transition,
             )
-            last_done = done_flag
-            if done_flag:
+            steps += valid_count
+            last_dones = sb.dones
+            for ep_ret, _ in sb.completed_episodes:
                 ep_idx += 1
-                if ep_idx % 5 == 0:
+                if ep_idx % 5 == 0 or len(learning_curve) == 0 or steps >= cfg.total_timesteps:
                     learning_curve.append({"step": float(steps), "episode_return": float(ep_ret)})
-                obs, info = env.reset(seed=cfg.seed + ep_idx)
-                ep_ret = 0.0
-            else:
-                obs, info = next_obs, next_info
+            obs, mask_batch = sb.obs, sb.action_masks
 
-        n = buffer.ptr
-        if n < 2:
+        if buffer.ptr == 0 or buffer.ptr * env.num_envs < 2:
             break
         next_proc = obs_rms.normalize(obs) if obs_rms is not None else obs
         with torch.no_grad():
-            next_v = float(net.get_value(torch.as_tensor(next_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item())
-        buffer.compute_returns_and_advantage(next_v, last_done, gamma=cfg.gamma, gae_lambda=cfg.gae_lambda)
+            next_v = net.get_value(obs_to_tensor(next_proc, env.obs_spec, dev)).cpu().numpy()
+        buffer.compute_returns_and_advantage(next_v, last_dones, gamma=cfg.gamma, gae_lambda=cfg.gae_lambda)
 
-        b_obs = torch.as_tensor(buffer.obs[:n], device=dev)
-        b_act = torch.as_tensor(buffer.actions[:n], device=dev)
-        b_old_lp = torch.as_tensor(buffer.logprobs[:n], device=dev)
-        b_adv = torch.as_tensor(buffer.advantages[:n], device=dev)
-        b_ret = torch.as_tensor(buffer.returns[:n], device=dev)
-        b_mask = torch.as_tensor(buffer.action_masks[:n], device=dev) if buffer.action_masks is not None else None
+        b_obs, b_act, b_old_lp, b_adv, b_ret, b_mask, b_vals = buffer.flatten_batch(dev)
+        if b_adv.numel() < 2:
+            break
         b_adv = (b_adv - b_adv.mean()) / (b_adv.std() + 1e-8)
 
         with torch.no_grad():
@@ -275,7 +289,7 @@ def train_trpo(
 
         # [AI-Prompt Hook]: Fisher-vector product + Conjugate Gradient natural policy step.
         def _surrogate(
-            obs_b: torch.Tensor = b_obs,
+            obs_b: Any = b_obs,
             mask_b: torch.Tensor | None = b_mask,
             act_b: torch.Tensor = b_act,
             old_lp_b: torch.Tensor = b_old_lp,
@@ -291,7 +305,7 @@ def train_trpo(
 
         def _fvp(
             v: torch.Tensor,
-            obs_b: torch.Tensor = b_obs,
+            obs_b: Any = b_obs,
             mask_b: torch.Tensor | None = b_mask,
             ref_dist: Any = old_dist,
         ) -> torch.Tensor:
@@ -335,48 +349,51 @@ def train_trpo(
             critic_opt.zero_grad()
             v_loss.backward()
             critic_opt.step()
-        ev_hist.append(explained_variance(buffer.values[:n], buffer.returns[:n]))
+        ev_hist.append(explained_variance(b_vals.cpu().numpy(), b_ret.cpu().numpy()))
+        maybe_periodic_hooks(
+            ctx,
+            steps,
+            algo_id=META.id,
+            policy_kind="actor_critic",
+            policy_spec=policy_spec,
+            primary_model_key="policy",
+            models=models_map,
+            optimizers=opts_map,
+            config_dict=cfg_dict,
+            eval_episodes=cfg.eval_episodes,
+            seed=cfg.seed,
+            ep_idx=ep_idx,
+            learning_curve=learning_curve,
+            rng=rng,
+        )
 
-    if obs_rms is not None:
-        obs_rms.freeze(True)
+    diagnostics: dict[str, Any] = {
+        "mean_kl": float(np.mean(kl_hist)) if kl_hist else 0.0,
+        "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
+        "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
+        "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
+        "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
+    }
+    if isinstance(net, ContinuousActorCritic):
+        diagnostics["final_logstd_mean"] = float(net.actor_logstd.detach().mean().item())
 
-    def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
-        o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-        obs_t = torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)
-        with eval_mode(net), torch.no_grad():
-            if env.is_discrete:
-                m = (info_in or {}).get("action_mask")
-                m_t = torch.as_tensor(m, device=dev, dtype=torch.bool).unsqueeze(0) if m is not None else None
-                act_t, _, _, _ = net.get_action_and_value(obs_t, action_mask=m_t, deterministic=True)  # type: ignore[call-arg]
-                return int(act_t.item())
-            act_t, _, _, _ = net.get_action_and_value(obs_t, deterministic=True)
-            return act_t.squeeze(0).cpu().numpy()
-
-    eval_target = eval_env_or_factory if eval_env_or_factory is not None else env
-    eval_stats = evaluate_policy_episodes(eval_target, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-
-    return TrainResult(
+    return finalize_online_run(
+        ctx,
         algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=steps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model=net,
-        config=asdict(cfg),
+        policy_kind="actor_critic",
+        policy_spec=policy_spec,
+        primary_model_key="policy",
+        models=models_map,
+        optimizers=opts_map,
+        result_model=net,
+        config_dict=cfg_dict,
+        steps=steps,
+        t0=t0,
+        ep_idx=ep_idx,
         learning_curve=learning_curve,
-        train_diagnostics={
-            "mean_kl": float(np.mean(kl_hist)) if kl_hist else 0.0,
-            "mean_entropy": float(np.mean(ent_hist)) if ent_hist else 0.0,
-            "final_entropy": float(ent_hist[-1]) if ent_hist else 0.0,
-            "mean_explained_variance": float(np.mean(ev_hist)) if ev_hist else 0.0,
-            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
-            **(
-                {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
-                if isinstance(net, ContinuousActorCritic)
-                else {}
-            ),
-        },
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,
+        train_diagnostics=diagnostics,
+        eval_episodes=cfg.eval_episodes,
+        seed=cfg.seed,
+        saw_action_mask=saw_action_mask,
+        rng=rng,
     )

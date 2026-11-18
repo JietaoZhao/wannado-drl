@@ -76,7 +76,7 @@ class TestCopilotAuditAndCLI(unittest.TestCase):
             self.assertIn("stage0_mdp_intake", brief)
             self.assertIn("recommended_suite", brief)
             self.assertIn("questions_to_ask_user", brief)
-            self.assertEqual(brief["arsenal_showcase"]["total_algorithms"], 27)
+            self.assertEqual(brief["arsenal_showcase"]["total_algorithms"], 30)
             self.assertGreaterEqual(len(brief["recommended_suite"]["classic_baselines"]), 1)
             self.assertGreaterEqual(len(brief["recommended_suite"]["frontier_sota"]), 1)
 
@@ -100,8 +100,8 @@ class TestCopilotAuditAndCLI(unittest.TestCase):
             self.assertEqual(low_scan.understanding_confidence, "low")
             self.assertIn("Share what was observed first", low_scan.project_summary_guess)
 
-            self.assertIn("27 Algorithms", format_arsenal_overview())
-            self.assertEqual(build_arsenal_showcase()["total_families"], 7)
+            self.assertIn("30 Algorithms", format_arsenal_overview())
+            self.assertEqual(build_arsenal_showcase()["total_families"], 8)
 
             # Continuous Gymnasium project -> confidence >= medium and continuous action suite
             pend_root = root / "pendulum_proj"

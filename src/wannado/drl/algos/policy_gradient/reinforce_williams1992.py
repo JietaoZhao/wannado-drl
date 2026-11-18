@@ -24,11 +24,17 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
-from wannado.drl.core.networks import ContinuousActorCritic, DiscreteActorCritic, MultiDiscreteActorCritic
+from wannado.drl.core.algo_helpers import (
+    build_actor_critic_for_env,
+    finalize_online_run,
+    maybe_periodic_hooks,
+    maybe_resume_online_run,
+    setup_online_run,
+)
+from wannado.drl.core.networks import ContinuousActorCritic
+from wannado.drl.core.obs_spec import obs_to_tensor
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import RunningMeanStd, ensure_gym_env
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
+from wannado.drl.core.utils import resolve_device, set_global_seed
 
 META = AlgoMeta(
     id="reinforce",
@@ -91,6 +97,15 @@ class ReinforceConfig:
     use_baseline: bool = True
     hidden_dims: tuple[int, ...] = (64, 64)
     normalize_obs: bool = False
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     eval_episodes: int = 10
     device: str = "auto"
     seed: int = 42
@@ -102,37 +117,49 @@ def train_reinforce(
     *,
     eval_env_or_factory: Any | None = None,
 ) -> TrainResult:
-    """Train REINFORCE (with optional learned state-value baseline) on Discrete or Continuous envs."""
+    """Train REINFORCE with optional state-value baseline, multimodal encoders, and checkpoints."""
     cfg = config or ReinforceConfig()
-    set_global_seed(cfg.seed)
+    rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
-    env = ensure_gym_env(env_or_factory)
-
-    net: DiscreteActorCritic | MultiDiscreteActorCritic | ContinuousActorCritic
-    if env.is_discrete:
-        net = DiscreteActorCritic(env.obs_dim, env.action_dim, hidden_dims=cfg.hidden_dims).to(dev)
-    elif env.action_nvec is not None:
-        net = MultiDiscreteActorCritic(env.obs_dim, env.action_nvec, hidden_dims=cfg.hidden_dims).to(dev)
-    else:
-        net = ContinuousActorCritic(
-            env.obs_dim,
-            env.action_dim,
-            hidden_dims=cfg.hidden_dims,
-            action_low=env.action_low,
-            action_high=env.action_high,
-        ).to(dev)
+    ctx = setup_online_run(
+        env_or_factory,
+        num_envs=1,
+        extractor_type=cfg.extractor_type,
+        normalize_obs=cfg.normalize_obs,
+        gamma=cfg.gamma,
+        checkpoint_dir=cfg.checkpoint_dir,
+        checkpoint_freq=cfg.checkpoint_freq,
+        eval_freq=cfg.eval_freq,
+        save_best_model=cfg.save_best_model,
+        keep_last_k=cfg.keep_last_k,
+        tb_log_dir=cfg.tb_log_dir,
+        eval_env_or_factory=eval_env_or_factory,
+        device=dev,
+    )
+    env, obs_rms = ctx.env, ctx.obs_rms
+    eval_single = env.build_eval_env(env_or_factory) if env._single_adapter is None else env._single_adapter
+    net, policy_spec, _, _ = build_actor_critic_for_env(
+        env,
+        hidden_dims=cfg.hidden_dims,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+        device=dev,
+    )
 
     optimizer = torch.optim.Adam(net.parameters(), lr=cfg.lr)
-    obs_rms = RunningMeanStd((env.obs_dim,)) if cfg.normalize_obs else None
+    cfg_dict = asdict(cfg)
+    models_map: dict[str, Any] = {"policy": net}
+    opts_map = {"policy": optimizer}
 
+    steps, ep_idx, learning_curve = maybe_resume_online_run(
+        ctx, resume_from=cfg.resume_from, models=models_map, optimizers=opts_map, rng=rng
+    )
     t0 = time.perf_counter()
-    steps = 0
-    ep_idx = 0
-    learning_curve: list[dict[str, float]] = []
     entropies: list[float] = []
+    saw_action_mask = False
 
     while steps < cfg.total_timesteps:
-        obs, info = env.reset(seed=cfg.seed + ep_idx)
+        obs, info = eval_single.reset(seed=cfg.seed + ep_idx)
         ep_idx += 1
         ep_obs, ep_acts, ep_rews, ep_masks = [], [], [], []
         done = False
@@ -146,18 +173,20 @@ def train_reinforce(
             else:
                 obs_proc = obs
 
-            obs_t = torch.as_tensor(obs_proc, device=dev, dtype=torch.float32).unsqueeze(0)
+            obs_t = obs_to_tensor(obs_proc, env.obs_spec, dev, add_batch_dim=True)
             mask = info.get("action_mask")
+            if mask is not None:
+                saw_action_mask = True
             mask_t = torch.as_tensor(mask, device=dev, dtype=torch.bool).unsqueeze(0) if mask is not None else None
             with torch.no_grad():
                 if env.is_discrete:
-                    act_t, _, _, _ = net.get_action_and_value(obs_t, action_mask=mask_t)  # type: ignore[call-arg]
+                    act_t, _, _, _ = net.get_action_and_value(obs_t, action_mask=mask_t)
                     act_env: Any = int(act_t.item())
                 else:
                     act_t, _, _, _ = net.get_action_and_value(obs_t)
                     act_env = act_t.squeeze(0).cpu().numpy()
 
-            next_obs, reward, term, trunc, info = env.step(act_env)
+            next_obs, reward, term, trunc, info = eval_single.step(act_env)
             ep_obs.append(obs_proc)
             ep_acts.append(act_env)
             ep_rews.append(float(reward))
@@ -169,18 +198,24 @@ def train_reinforce(
             last_trunc = bool(trunc)
             done = bool(term or trunc)
 
-        # Compute backward discounted returns G_t (bootstrapping across TimeLimit truncation when baseline exists)
         returns = np.zeros(len(ep_rews), dtype=np.float32)
         g = 0.0
         if cfg.use_baseline and (last_trunc or not last_term) and not last_term:
             tail_proc = obs_rms.normalize(obs) if obs_rms is not None else obs
             with torch.no_grad():
-                g = float(net.get_value(torch.as_tensor(tail_proc, device=dev, dtype=torch.float32).unsqueeze(0)).item())
+                g = float(net.get_value(obs_to_tensor(tail_proc, env.obs_spec, dev, add_batch_dim=True)).item())
         for i in range(len(ep_rews) - 1, -1, -1):
             g = ep_rews[i] + cfg.gamma * g
             returns[i] = g
 
-        b_obs = torch.as_tensor(np.asarray(ep_obs, dtype=np.float32), device=dev)
+        if isinstance(ep_obs[0], dict):
+            b_obs: Any = {
+                k: obs_to_tensor(np.stack([o[k] for o in ep_obs], axis=0), env.obs_spec.leaves[k], dev)
+                for k in env.obs_spec.leaves
+                if k in ep_obs[0]
+            }
+        else:
+            b_obs = obs_to_tensor(np.stack(ep_obs, axis=0), env.obs_spec, dev)
         b_ret = torch.as_tensor(returns, device=dev)
         b_act = torch.as_tensor(
             np.asarray(ep_acts, dtype=np.int64 if (env.is_discrete or env.action_nvec is not None) else np.float32), device=dev
@@ -188,13 +223,13 @@ def train_reinforce(
         b_mask = torch.as_tensor(np.asarray(ep_masks, dtype=np.bool_), device=dev) if env.is_discrete else None
 
         if env.is_discrete:
-            _, logprob, entropy, values = net.get_action_and_value(b_obs, action=b_act, action_mask=b_mask)  # type: ignore[call-arg]
+            _, logprob, entropy, values = net.get_action_and_value(b_obs, action=b_act, action_mask=b_mask)
         else:
             _, logprob, entropy, values = net.get_action_and_value(b_obs, action=b_act)
 
         # [AI-Prompt Hook]: Replace Monte Carlo G_t - V(s) below with GAE or group-normalized rewards.
         if cfg.use_baseline:
-            adv = (b_ret - values.detach())
+            adv = b_ret - values.detach()
             value_loss = 0.5 * F.mse_loss(values, b_ret)
         else:
             adv = b_ret
@@ -211,47 +246,50 @@ def train_reinforce(
         optimizer.step()
         entropies.append(float(entropy.mean().item()))
 
-        if ep_idx % 5 == 0 or steps >= cfg.total_timesteps:
+        if ep_idx % 5 == 0 or len(learning_curve) == 0 or steps >= cfg.total_timesteps:
             learning_curve.append({"step": float(steps), "episode_return": float(sum(ep_rews)), "entropy": entropies[-1]})
+        maybe_periodic_hooks(
+            ctx,
+            steps,
+            algo_id=META.id,
+            policy_kind="actor_critic",
+            policy_spec=policy_spec,
+            primary_model_key="policy",
+            models=models_map,
+            optimizers=opts_map,
+            config_dict=cfg_dict,
+            eval_episodes=cfg.eval_episodes,
+            seed=cfg.seed,
+            ep_idx=ep_idx,
+            learning_curve=learning_curve,
+            rng=rng,
+        )
 
-    if obs_rms is not None:
-        obs_rms.freeze(True)
+    diagnostics: dict[str, Any] = {
+        "mean_entropy": float(np.mean(entropies)) if entropies else 0.0,
+        "final_entropy": float(entropies[-1]) if entropies else 0.0,
+        "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
+    }
+    if isinstance(net, ContinuousActorCritic):
+        diagnostics["final_logstd_mean"] = float(net.actor_logstd.detach().mean().item())
 
-    def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
-        o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-        obs_t = torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)
-        with eval_mode(net), torch.no_grad():
-            if env.is_discrete:
-                m = (info_in or {}).get("action_mask")
-                m_t = torch.as_tensor(m, device=dev, dtype=torch.bool).unsqueeze(0) if m is not None else None
-                act_t, _, _, _ = net.get_action_and_value(obs_t, action_mask=m_t, deterministic=True)  # type: ignore[call-arg]
-                return int(act_t.item())
-            act_t, _, _, _ = net.get_action_and_value(obs_t, deterministic=True)
-            return act_t.squeeze(0).cpu().numpy()
-
-    eval_target = eval_env_or_factory if eval_env_or_factory is not None else env
-    eval_stats = evaluate_policy_episodes(eval_target, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-
-    return TrainResult(
+    return finalize_online_run(
+        ctx,
         algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=steps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model=net,
-        config=asdict(cfg),
+        policy_kind="actor_critic",
+        policy_spec=policy_spec,
+        primary_model_key="policy",
+        models=models_map,
+        optimizers=opts_map,
+        result_model=net,
+        config_dict=cfg_dict,
+        steps=steps,
+        t0=t0,
+        ep_idx=ep_idx,
         learning_curve=learning_curve,
-        train_diagnostics={
-            "mean_entropy": float(np.mean(entropies)) if entropies else 0.0,
-            "final_entropy": float(entropies[-1]) if entropies else 0.0,
-            "is_continuous": 0.0 if (env.is_discrete or env.action_nvec is not None) else 1.0,
-            **(
-                {"final_logstd_mean": float(net.actor_logstd.detach().mean().item())}
-                if isinstance(net, ContinuousActorCritic)
-                else {}
-            ),
-        },
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True if obs_rms is None else obs_rms.frozen,
+        train_diagnostics=diagnostics,
+        eval_episodes=cfg.eval_episodes,
+        seed=cfg.seed,
+        saw_action_mask=saw_action_mask,
+        rng=rng,
     )

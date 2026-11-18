@@ -1,15 +1,13 @@
 ---
-description: AI-Native Problem-to-MDP design, CleanRL single-file DRL training, anti-fake-convergence auditing, and paper reporting with wannado-drl.
+description: Engineering protocol & machine-verifiable DRL verification gate for wannado-drl (Future-Leakage Probes, 30 CleanRL algos across 8 families, Safe/CVaR RL, SB3/PyTorch policy audit, and rliable reporting).
 alwaysApply: false
 ---
 
-# wannado-drl Cursor Co-Pilot Rule
+# wannado-drl Cursor Rule
 
-For complete 5-stage workflow instructions, read `.agents/skills/wannado-drl/SKILL.md` (or `AGENTS.md`) and run `wannado-drl inspect .` first.
+Read `.agents/skills/wannado-drl/SKILL.md` (or `AGENTS.md`) for full specifications.
 
-0. **Scope & Coexistence (`wannado-adv`)**: Activate `wannado-drl` ONLY for MDP modeling, DRL training/comparison, and RL reporting (`./drl_lab/`). When `wannado-adv` is also present and the user requests adversarial robustness testing on a trained policy, hand off to `./adv_eval/` cleanly and bake frozen `obs_rms_state` (`mean`, `var`) via differentiable PyTorch ops inside `VictimInterface`.
-
-1. **Inspect First -> Explain Understanding -> Show Arsenal -> Pop Goal Dialog**: Run `wannado-drl inspect .`; explain what you observed first, show `wannado-drl` Classic->2025 SOTA arsenal, and pop the 2-step Goal Confirmation Dialog (confirm inferred goal or ask 1 sentence) before Stage 0 `drl_lab/mdp_spec.json` alignment.
-2. **External `drl_lab/` & Classic + SOTA Matching**: Search classic + SOTA algorithms (`recommend_algo_suite`); wire via `drl_lab/interface.py` (`EnvInterface`); eject single files via `wannado-drl eject <algo_id> --dest ./drl_lab/algos`.
-3. **Zero-Jargon Knobs + Data Path + Preflight + ETA**: Run `preflight_env()`; explain EVERY term (episodes, `epsilon`, `gamma`, `ent_coef`, etc.) in plain analogies via `explain_parameters()`, confirm data save location (`./drl_lab/outputs/`) and measured ETA before training.
-4. **Visual `.md` Report, Audit & Verified Provenance**: Run `evaluate_drl_suite(..., run_audit=True)` + `report.save()`, report plain verdict (`build_post_run_debrief`) with `paper_summary.md` tables & charts (`results_overview.png`/`.svg`), flag any traps, cite BOTH every algorithm AND every optimization (`OPTIMIZATION_PROVENANCE` / `verified_bibliography`), and pull citations only via `wannado-drl cite`.
+0. **Scope & Handoff (`wannado-adv`)**: Activate `wannado-drl` strictly for MDP modeling, DRL training/auditing, and RL reporting (`./drl_lab/`). Hand off adversarial perturbation attacks cleanly to `./adv_eval/` and preserve frozen `obs_rms_state` (`mean`, `var`) via differentiable PyTorch ops in `VictimInterface`.
+1. **Isolate Inside `./drl_lab/`**: Scaffold via `wannado-drl scaffold`, customize single files via `wannado-drl eject <algo_id>`, and expose `reward_terms`, `task_metrics`, and (when constrained) `info['cost']`. Use `wannado-drl inspect .` + `explain_parameters()` when onboarding ambiguous user projects.
+2. **Hard Verification Gate (`wannado-drl verify`)**: Never declare an RL run done until `wannado-drl verify --interface ./drl_lab/interface.py --seeds 0 1 2` (or `preflight_env` + `evaluate_drl_suite` / `audit_external_policy` for SB3/PyTorch policies) exits `0` with zero Future-Leakage Probe alerts and zero Stage 3 `RigorAuditReport` red flags.
+3. **rliable Reports & Verbatim Provenance**: Save `paper_summary.md` (Bootstrap 95% CIs, pairwise $P(A>B)$, Performance Profiles), `results_overview.png`/`.svg`, and verbatim citations from `OPTIMIZATION_PROVENANCE` / `wannado-drl cite --include-audit-refs`.

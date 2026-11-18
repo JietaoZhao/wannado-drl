@@ -13,6 +13,7 @@ FamilyType = Literal[
     "value_based",
     "policy_gradient",
     "actor_critic_off",
+    "safe_constrained",
     "offline_rl",
     "multi_agent",
     "llm_and_discovered",
@@ -145,6 +146,16 @@ class TrainResult:
     obs_rms_frozen_on_eval: bool = True
     optimizations_used: list[str] = field(default_factory=list)
     extra: dict[str, Any] = field(default_factory=dict)
+    eval_history: list[dict[str, float]] = field(default_factory=list)
+    best_model_path: str | None = None
+    last_checkpoint_path: str | None = None
+    policy_bundle: Any = None
+
+    def save_policy(self, path: str | Any) -> Any:
+        """Persist a standalone self-contained PolicyBundle checkpoint for deployment or auditing."""
+        if self.policy_bundle is None:
+            raise RuntimeError("This TrainResult does not attach a serialized PolicyBundle.")
+        return self.policy_bundle.save(path)
 
     def to_summary_dict(self) -> dict[str, Any]:
         """Serialize JSON-safe summary (excluding non-serializable PyTorch modules/callables)."""
@@ -159,6 +170,9 @@ class TrainResult:
             "eval_stats": self.eval_stats.to_dict() if self.eval_stats is not None else None,
             "obs_rms_frozen_on_eval": self.obs_rms_frozen_on_eval,
             "optimizations_used": list(self.optimizations_used),
+            "eval_history": list(self.eval_history),
+            "best_model_path": self.best_model_path,
+            "last_checkpoint_path": self.last_checkpoint_path,
             "extra": {
                 k: (v.tolist() if isinstance(v, np.ndarray) else v)
                 for k, v in self.extra.items()

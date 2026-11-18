@@ -261,6 +261,23 @@ def audit_drl_rigor(
                 red_flags.append("q_value_explosion")
                 recommendations.append("Q-values exploded (>1e4); use Double/Twin Q, LayerNorm critics, or gradient clipping.")
 
+        sat_rate = diag.get("action_saturation_rate")
+        if sat_rate is not None and float(sat_rate) > 0.95:
+            policy_health_ok = False
+            if "policy_action_saturation" not in red_flags:
+                red_flags.append("policy_action_saturation")
+                recommendations.append(
+                    f"Policy actions saturated at box bounds ({float(sat_rate):.1%} of eval steps); inspect action scaling or entropy regularization."
+                )
+
+        if bool(diag.get("cost_budget_exceeded", False)):
+            policy_health_ok = False
+            if "safety_constraint_budget_exceeded" not in red_flags:
+                red_flags.append("safety_constraint_budget_exceeded")
+                recommendations.append(
+                    "Policy exceeded safety constraint cost budget; increase Lagrangian multiplier LR or tighten cost limit."
+                )
+
         if r.eval_stats is not None:
             ret_pts = [p["episode_return"] for p in r.learning_curve[-3:] if "episode_return" in p]
             if len(ret_pts) >= 3:

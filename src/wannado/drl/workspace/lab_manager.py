@@ -323,6 +323,11 @@ def main() -> None:
     parser.add_argument("--gamma", type=float, default=None, help="Override discount factor gamma.")
     parser.add_argument("--lr", type=float, default=None, help="Override learning rate.")
     parser.add_argument("--eps-end", type=float, default=None, help="Override final greedy epsilon (for DQN/Q-learning).")
+    parser.add_argument("--num-envs", type=int, default=None, help="Parallel VectorEnv count for batched rollout/replay.")
+    parser.add_argument("--extractor", default=None, help="Observation extractor (auto, flatten, nature_cnn, impala, set_attention, dict).")
+    parser.add_argument("--checkpoint-dir", default=None, help="Directory for atomic best/last checkpoints & progress logs.")
+    parser.add_argument("--eval-freq", type=int, default=None, help="Periodic deterministic eval & best-model selection interval (steps).")
+    parser.add_argument("--resume-from", default=None, help="Checkpoint path (.pt) to deterministically resume training.")
     parser.add_argument("--output-dir", default=None, help="Custom directory to store reports, figures, CSV, and BibTeX.")
     parser.add_argument("--device", default="auto")
     parser.add_argument("--no-audit", action="store_true")
@@ -361,6 +366,11 @@ def main() -> None:
         "gamma": args.gamma,
         "lr": args.lr,
         "eps_end": args.eps_end,
+        "num_envs": args.num_envs,
+        "extractor_type": args.extractor,
+        "checkpoint_dir": args.checkpoint_dir,
+        "eval_freq": args.eval_freq,
+        "resume_from": args.resume_from,
         "device": args.device,
     }
     algo_configs = {}

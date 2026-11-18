@@ -16,7 +16,7 @@ import matplotlib.pyplot as plt
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT / "src"))
 
-from wannado.drl import (  # noqa: E402
+from wannado.drl import (
     A2CConfig,
     DoubleDQNConfig,
     DuelingDQNConfig,

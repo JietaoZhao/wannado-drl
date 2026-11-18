@@ -22,14 +22,25 @@ from typing import Any
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.distributions import Categorical, Normal
+from torch.distributions import Categorical
 
-from wannado.drl.core.networks import QNetwork, TwinQCritic, build_mlp
-from wannado.drl.core.offline_risk import evaluate_offline_wis
+from wannado.drl.core.algo_helpers import (
+    finalize_offline_run,
+    maybe_offline_periodic_hooks,
+    prepare_offline_run,
+    setup_offline_run,
+)
+from wannado.drl.core.networks import (
+    ContinuousGaussianActor,
+    DiscretePolicyNet,
+    QNetwork,
+    TwinQCritic,
+    ValueNetwork,
+)
+from wannado.drl.core.obs_spec import obs_to_tensor, slice_obs
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
-from wannado.drl.core.utils import eval_mode, hard_update, polyak_update, resolve_device, set_global_seed
-from wannado.drl.core.wrappers import OfflineTransitionDataset, RunningMeanStd
-from wannado.drl.mdp.baselines import evaluate_policy_episodes
+from wannado.drl.core.utils import hard_update, polyak_update, resolve_device, set_global_seed
+from wannado.drl.core.wrappers import OfflineTransitionDataset
 
 META = AlgoMeta(
     id="iql_offline",
@@ -91,8 +102,17 @@ class IQLConfig:
     awr_beta: float = 3.0
     max_awr_weight: float = 100.0
     hidden_dims: tuple[int, ...] = (128, 128)
+    extractor_type: str = "auto"
+    extractor_kwargs: dict[str, Any] | None = None
     normalize_obs: bool = True
     eval_episodes: int = 10
+    checkpoint_dir: str | None = None
+    checkpoint_freq: int = 0
+    eval_freq: int = 0
+    save_best_model: bool = True
+    keep_last_k: int = 3
+    resume_from: str | None = None
+    tb_log_dir: str | None = None
     device: str = "auto"
     seed: int = 42
 
@@ -116,50 +136,131 @@ def train_iql_offline(
     if n_data < 2:
         raise ValueError("Offline dataset must contain at least 2 transitions.")
 
-    obs_rms = RunningMeanStd((dataset.obs_dim,)) if cfg.normalize_obs else None
-    if obs_rms is not None:
-        obs_rms.update(dataset.obs)
-        obs_rms.freeze(True)
-        obs_all = obs_rms.normalize(dataset.obs)
-        next_obs_all = obs_rms.normalize(dataset.next_obs)
-    else:
-        obs_all = dataset.obs
-        next_obs_all = dataset.next_obs
+    ctx = setup_offline_run(
+        dataset,
+        extractor_type=cfg.extractor_type,
+        normalize_obs=cfg.normalize_obs,
+        checkpoint_dir=cfg.checkpoint_dir,
+        checkpoint_freq=cfg.checkpoint_freq,
+        eval_freq=cfg.eval_freq,
+        save_best_model=cfg.save_best_model,
+        keep_last_k=cfg.keep_last_k,
+        tb_log_dir=cfg.tb_log_dir,
+        eval_env_or_factory=eval_env_or_factory,
+        device=dev,
+    )
+    obs_spec = ctx.obs_spec
+    cfg_dict = asdict(cfg)
 
-    v_net = build_mlp(dataset.obs_dim, cfg.hidden_dims, 1, activation=torch.nn.ReLU).to(dev)
+    v_net = ValueNetwork(
+        obs_spec,
+        cfg.hidden_dims,
+        extractor_type=cfg.extractor_type,
+        extractor_kwargs=cfg.extractor_kwargs,
+    ).to(dev)
     v_opt = torch.optim.Adam(v_net.parameters(), lr=cfg.lr)
 
     if dataset.is_discrete:
-        q_net = QNetwork(dataset.obs_dim, dataset.action_dim, cfg.hidden_dims).to(dev)
-        target_q = QNetwork(dataset.obs_dim, dataset.action_dim, cfg.hidden_dims).to(dev)
+        q_net = QNetwork(
+            obs_spec,
+            dataset.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        target_q = QNetwork(
+            obs_spec,
+            dataset.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
         hard_update(q_net, target_q)
-        actor_logits = build_mlp(dataset.obs_dim, cfg.hidden_dims, dataset.action_dim, activation=torch.nn.ReLU).to(dev)
+        actor_logits = DiscretePolicyNet(
+            obs_spec,
+            dataset.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
         q_opt = torch.optim.Adam(q_net.parameters(), lr=cfg.lr)
         actor_opt = torch.optim.Adam(actor_logits.parameters(), lr=cfg.lr)
+
+        policy_kind = "discrete_policy"
+        primary_key = "actor"
+        policy_spec = {
+            "net_class": "DiscretePolicyNet",
+            "init_kwargs": {
+                "action_dim": int(dataset.action_dim),
+                "hidden_dims": list(cfg.hidden_dims),
+                "extractor_type": cfg.extractor_type,
+                "extractor_kwargs": cfg.extractor_kwargs,
+            },
+        }
+        models_map: dict[str, Any] = {"actor": actor_logits, "q": q_net, "target_q": target_q, "v": v_net}
+        opts_map: dict[str, torch.optim.Optimizer] = {"actor": actor_opt, "q": q_opt, "v": v_opt}
+        result_model: Any = {"actor": actor_logits, "q": q_net, "v": v_net}
     else:
-        q_net_twin = TwinQCritic(dataset.obs_dim, dataset.action_dim, cfg.hidden_dims).to(dev)
-        target_q_twin = TwinQCritic(dataset.obs_dim, dataset.action_dim, cfg.hidden_dims).to(dev)
-        hard_update(q_net_twin, target_q_twin)
-        actor_mean = build_mlp(dataset.obs_dim, cfg.hidden_dims, dataset.action_dim, activation=torch.nn.Tanh).to(dev)
-        actor_logstd = torch.nn.Parameter(torch.zeros(1, dataset.action_dim, device=dev))
-        q_opt = torch.optim.Adam(q_net_twin.parameters(), lr=cfg.lr)
-        actor_opt = torch.optim.Adam(list(actor_mean.parameters()) + [actor_logstd], lr=cfg.lr)
         act_low = dataset.action_low if dataset.action_low is not None else -np.ones(dataset.action_dim, dtype=np.float32)
         act_high = dataset.action_high if dataset.action_high is not None else np.ones(dataset.action_dim, dtype=np.float32)
-        scale_np = (act_high - act_low) / 2.0
-        bias_np = (act_high + act_low) / 2.0
+        q_net_twin = TwinQCritic(
+            obs_spec,
+            dataset.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        target_q_twin = TwinQCritic(
+            obs_spec,
+            dataset.action_dim,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        hard_update(q_net_twin, target_q_twin)
+        actor_cont = ContinuousGaussianActor(
+            obs_spec,
+            dataset.action_dim,
+            act_low,
+            act_high,
+            cfg.hidden_dims,
+            extractor_type=cfg.extractor_type,
+            extractor_kwargs=cfg.extractor_kwargs,
+        ).to(dev)
+        q_opt = torch.optim.Adam(q_net_twin.parameters(), lr=cfg.lr)
+        actor_opt = torch.optim.Adam(actor_cont.parameters(), lr=cfg.lr)
+
+        policy_kind = "gaussian_actor"
+        primary_key = "actor"
+        policy_spec = {
+            "net_class": "ContinuousGaussianActor",
+            "init_kwargs": {
+                "action_dim": int(dataset.action_dim),
+                "action_low": act_low.tolist(),
+                "action_high": act_high.tolist(),
+                "hidden_dims": list(cfg.hidden_dims),
+                "extractor_type": cfg.extractor_type,
+                "extractor_kwargs": cfg.extractor_kwargs,
+            },
+        }
+        models_map = {"actor": actor_cont, "q": q_net_twin, "target_q": target_q_twin, "v": v_net}
+        opts_map = {"actor": actor_opt, "q": q_opt, "v": v_opt}
+        result_model = {"actor": actor_cont, "q": q_net_twin, "v": v_net}
+
+    obs_all, next_obs_all, start_step, learning_curve = prepare_offline_run(
+        ctx, dataset, resume_from=cfg.resume_from, models=models_map, optimizers=opts_map, rng=rng
+    )
 
     t0 = time.perf_counter()
-    learning_curve: list[dict[str, float]] = []
     v_losses, q_losses, q_hist = [], [], []
     masks_raw = dataset.extra.get("action_masks")
     masks_all = np.asarray(masks_raw, dtype=np.bool_) if (dataset.is_discrete and masks_raw is not None) else None
 
-    for step in range(1, cfg.num_grad_steps + 1):
+    for step in range(start_step + 1, cfg.num_grad_steps + 1):
         idx = rng.integers(0, n_data, size=cfg.batch_size)
-        b_obs = torch.as_tensor(obs_all[idx], device=dev, dtype=torch.float32)
+        b_obs = obs_to_tensor(slice_obs(obs_all, idx), obs_spec, dev, add_batch_dim=False)
         b_rew = torch.as_tensor(dataset.rewards[idx], device=dev, dtype=torch.float32)
-        b_next = torch.as_tensor(next_obs_all[idx], device=dev, dtype=torch.float32)
+        b_next = obs_to_tensor(slice_obs(next_obs_all, idx), obs_spec, dev, add_batch_dim=False)
         b_term = torch.as_tensor(dataset.terminateds[idx], device=dev, dtype=torch.float32)
 
         if dataset.is_discrete:
@@ -221,9 +322,8 @@ def train_iql_offline(
                 tq1_a, tq2_a = target_q_twin(b_obs, b_act)
                 adv = torch.min(tq1_a, tq2_a).squeeze(-1) - v_net(b_obs).squeeze(-1)
                 weights = torch.exp(cfg.awr_beta * adv).clamp(max=cfg.max_awr_weight)
-            mean = torch.tanh(actor_mean(b_obs)) * torch.as_tensor(scale_np, device=dev) + torch.as_tensor(bias_np, device=dev)
-            std = torch.exp(actor_logstd.clamp(-5.0, 2.0)).expand_as(mean)
-            log_probs = Normal(mean, std).log_prob(b_act).sum(dim=-1)
+            dist = actor_cont.get_dist(b_obs)
+            log_probs = dist.log_prob(b_act).sum(dim=-1)
             actor_loss = -(weights * log_probs).mean()
             actor_opt.zero_grad()
             actor_loss.backward()
@@ -234,49 +334,39 @@ def train_iql_offline(
         q_losses.append(float(q_loss.item()))
         if step % max(1, cfg.num_grad_steps // 10) == 0:
             learning_curve.append({"step": float(step), "v_loss": v_losses[-1], "q_loss": q_losses[-1]})
+            if ctx.ckpt_mgr is not None:
+                ctx.ckpt_mgr.log_scalars(step, {"train/v_loss": v_losses[-1], "train/q_loss": q_losses[-1]})
 
-    if dataset.is_discrete:
-        model_obj: Any = {"actor": actor_logits, "q": q_net, "v": v_net}
+        maybe_offline_periodic_hooks(
+            ctx,
+            step,
+            algo_id=META.id,
+            policy_kind=policy_kind,
+            policy_spec=policy_spec,
+            primary_model_key=primary_key,
+            models=models_map,
+            optimizers=opts_map,
+            config_dict=cfg_dict,
+            eval_episodes=cfg.eval_episodes,
+            seed=cfg.seed,
+            learning_curve=learning_curve,
+            rng=rng,
+        )
 
-        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
-            o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-            with eval_mode(actor_logits), torch.no_grad():
-                logits_p = actor_logits(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)).squeeze(0)
-                mask = (info_in or {}).get("action_mask")
-                if mask is not None:
-                    m_t = torch.as_tensor(mask, device=dev, dtype=torch.bool).view_as(logits_p)
-                    if bool(m_t.any()):
-                        logits_p = logits_p.masked_fill(~m_t, -1e9)
-                return int(torch.argmax(logits_p).item())
-    else:
-        model_obj = {"actor": actor_mean, "q": q_net_twin, "v": v_net}
-
-        def policy_fn(obs_in: np.ndarray, info_in: dict[str, Any] | None = None) -> Any:
-            _ = info_in
-            o = obs_rms.normalize(obs_in) if obs_rms is not None else np.asarray(obs_in, dtype=np.float32)
-            with eval_mode(actor_mean), torch.no_grad():
-                m = torch.tanh(actor_mean(torch.as_tensor(o, device=dev, dtype=torch.float32).unsqueeze(0)))
-                return m.squeeze(0).cpu().numpy() * scale_np + bias_np
-
-    eval_stats = (
-        evaluate_policy_episodes(eval_env_or_factory, policy_fn, num_episodes=cfg.eval_episodes, seed=cfg.seed + 10_000)
-        if eval_env_or_factory is not None
-        else None
-    )
-    ope_stats = (
-        evaluate_offline_wis(dataset, policy_fn, gamma=cfg.gamma)
-        if eval_stats is None
-        else None
-    )
-
-    return TrainResult(
+    return finalize_offline_run(
+        ctx,
+        dataset,
         algo_id=META.id,
-        seed=cfg.seed,
-        total_timesteps=cfg.num_grad_steps,
-        elapsed_seconds=time.perf_counter() - t0,
-        policy_fn=policy_fn,
-        model=model_obj,
-        config=asdict(cfg),
+        policy_kind=policy_kind,
+        policy_spec=policy_spec,
+        primary_model_key=primary_key,
+        models=models_map,
+        optimizers=opts_map,
+        result_model=result_model,
+        config_dict=cfg_dict,
+        num_grad_steps=cfg.num_grad_steps,
+        gamma=cfg.gamma,
+        t0=t0,
         learning_curve=learning_curve,
         train_diagnostics={
             "mean_expectile_v_loss": float(np.mean(v_losses)) if v_losses else 0.0,
@@ -284,17 +374,8 @@ def train_iql_offline(
             "mean_q_value": float(np.mean(q_hist)) if q_hist else 0.0,
             "max_q_value": float(max(q_hist, key=abs)) if q_hist else 0.0,
             "is_continuous": 0.0 if dataset.is_discrete else 1.0,
-            **(
-                {
-                    "ope_wis_return": float(ope_stats["wis_return"]),
-                    "ope_behavior_return": float(ope_stats["behavior_return"]),
-                    "ope_effective_sample_size": float(ope_stats["effective_sample_size"]),
-                }
-                if ope_stats is not None
-                else {}
-            ),
         },
-        eval_stats=eval_stats,
-        obs_rms_state=obs_rms.state_dict() if obs_rms is not None else None,
-        obs_rms_frozen_on_eval=True,
+        eval_episodes=cfg.eval_episodes,
+        seed=cfg.seed,
+        rng=rng,
     )

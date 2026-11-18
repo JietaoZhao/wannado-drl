@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "wannado-drl"
-version = "1.0.5"
+version = "1.1.0"
 description = "AI-focused, CleanRL-style modular deep reinforcement learning platform with Problem-to-MDP co-design, multi-library env adapters, anti-fake-convergence auditing, and verified citations."
 readme = "README.md"
 requires-python = ">=3.10"

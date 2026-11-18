@@ -15,9 +15,16 @@ from typing import Any
 
 import numpy as np
 
+from wannado.drl.audit.probes import MDPProbeReport, probe_transition_batch
 from wannado.drl.core.offline_risk import compute_cvar
 from wannado.drl.core.types import EpisodeEvalStats
-from wannado.drl.core.wrappers import MultiAgentEnvAdapter, OfflineTransitionDataset, SequenceTaskEnv, ensure_gym_env
+from wannado.drl.core.wrappers import (
+    MultiAgentEnvAdapter,
+    OfflineTransitionDataset,
+    SequenceTaskEnv,
+    VectorizedEnvAdapter,
+    ensure_gym_env,
+)
 from wannado.drl.mdp.baselines import evaluate_heuristic_baseline, evaluate_random_baseline
 
 
@@ -89,10 +96,11 @@ def preflight_env(
     env_or_factory: Any,
     *,
     heuristic_fn: Callable[[np.ndarray, dict[str, Any]], Any] | None = None,
-    probe_steps: int = 80,
+    probe_steps: int = 120,
     baseline_episodes: int = 6,
     seed: int = 42,
     strict: bool = False,
+    run_probes: bool = True,
 ) -> PreflightReport:
     """Run Stage 1 MDP contract validation, speed benchmarking, and Random/Heuristic baselines."""
     warnings: list[str] = []
@@ -100,7 +108,9 @@ def preflight_env(
     recommendations: list[str] = []
 
     probe_target = env_or_factory
-    if (
+    if isinstance(probe_target, VectorizedEnvAdapter):
+        probe_target = probe_target.raw_env
+    elif (
         callable(env_or_factory)
         and (isinstance(env_or_factory, type) or not hasattr(env_or_factory, "step"))
         and not hasattr(env_or_factory, "possible_agents")
@@ -161,6 +171,34 @@ def preflight_env(
             std_return=float(np.std(off_ep_rets)) if off_ep_rets else 0.0,
             mean_length=float(np.mean(off_ep_lens)) if off_ep_lens else float(n),
         )
+        probe_report: MDPProbeReport | None = None
+        if run_probes and not errors:
+            trunc_arr = getattr(probe_target, "truncateds", None)
+            off_dones = (
+                np.logical_or(probe_target.terminateds > 0.5, trunc_arr > 0.5)
+                if trunc_arr is not None
+                else (probe_target.terminateds > 0.5)
+            )
+            probe_report = probe_transition_batch(
+                probe_target.obs[: min(n, 256)],
+                probe_target.actions[: min(n, 256)],
+                probe_target.rewards[: min(n, 256)],
+                probe_target.next_obs[: min(n, 256)],
+                off_dones[: min(n, 256)],
+                masks=probe_target.extra["action_masks"][: min(n, 256)] if "action_masks" in probe_target.extra else None,
+                n_permutations=30,
+                seed=seed,
+            )
+            for msg in probe_report.warnings:
+                if msg not in warnings:
+                    warnings.append(msg)
+            for msg in probe_report.errors:
+                if msg not in errors:
+                    errors.append(msg)
+            for msg in probe_report.recommendations:
+                if msg not in recommendations:
+                    recommendations.append(msg)
+
         dt_ms = max(0.001, (time.perf_counter() - t0) * 1000.0)
         ok = len(errors) == 0
         rep = PreflightReport(
@@ -183,6 +221,7 @@ def preflight_env(
                 "obs_abs_max": obs_abs_max,
                 "max_abs_reward": max_abs_r,
                 "saw_action_mask": "action_masks" in probe_target.extra,
+                **({"probes": probe_report.to_dict()} if probe_report is not None else {}),
             },
         )
         if strict and not ok:
@@ -295,6 +334,11 @@ def preflight_env(
     # 1. Seeded reset reproducibility check
     obs_a, _info_a = env.reset(seed=seed)
     obs_b, _ = env.reset(seed=seed)
+    reset_samples: list[np.ndarray] = [np.asarray(obs_a, dtype=np.float64).reshape(-1)]
+    if run_probes:
+        for r_off in (1001, 1002):
+            obs_r, _ = env.reset(seed=seed + r_off)
+            reset_samples.append(np.asarray(obs_r, dtype=np.float64).reshape(-1))
     if not np.all(np.isfinite(obs_a)):
         errors.append("Initial observation from reset() contains NaN or Inf.")
     if obs_a.shape != (env.obs_dim,):
@@ -308,6 +352,11 @@ def preflight_env(
     rng = np.random.default_rng(seed)
     obs, info = env.reset(seed=seed)
     rews: list[float] = []
+    probe_obs: list[np.ndarray] = []
+    probe_next_obs: list[np.ndarray] = []
+    probe_acts: list[np.ndarray] = []
+    probe_dones: list[bool] = []
+    probe_masks: list[np.ndarray] = []
     obs_abs_max = float(np.max(np.abs(obs))) if obs.size else 0.0
     ep_steps = 0
     ep_lengths: list[int] = []
@@ -318,26 +367,33 @@ def preflight_env(
 
     t0 = time.perf_counter()
     for _ in range(probe_steps):
+        step_mask = info.get("action_mask")
         if env.is_discrete:
-            mask = info.get("action_mask")
+            mask = step_mask
             if mask is not None:
                 saw_mask = True
-                valid = np.flatnonzero(np.asarray(mask, dtype=np.bool_))
+                m_bool = np.asarray(mask, dtype=np.bool_).reshape(-1)
+                probe_masks.append(m_bool)
+                valid = np.flatnonzero(m_bool)
                 if valid.size == 0:
                     errors.append("action_mask has zero valid actions; agent is trapped with no legal move.")
                     break
                 act: Any = int(rng.choice(valid))
             else:
                 act = int(rng.integers(0, env.action_dim))
+            act_vec = np.array([float(act)], dtype=np.float64)
         elif env.action_nvec is not None:
             act = np.asarray([int(rng.integers(0, k)) for k in env.action_nvec], dtype=np.int64)
+            act_vec = np.asarray(act, dtype=np.float64).reshape(-1)
         else:
             low_raw = env.action_low if env.action_low is not None else np.full(env.action_dim, -1.0, dtype=np.float32)
             high_raw = env.action_high if env.action_high is not None else np.full(env.action_dim, 1.0, dtype=np.float32)
             low = np.where(np.isfinite(low_raw), low_raw, -1.0)
             high = np.where(np.isfinite(high_raw), high_raw, 1.0)
             act = rng.uniform(low, high).astype(np.float32)
+            act_vec = np.asarray(act, dtype=np.float64).reshape(-1)
 
+        prev_obs = obs
         obs, rew, term, trunc, info = env.step(act)
         ep_steps += 1
         rews.append(float(rew))
@@ -349,6 +405,10 @@ def preflight_env(
             errors.append("Environment reward became NaN/Inf during rollout.")
             break
         obs_abs_max = max(obs_abs_max, float(np.max(np.abs(obs))))
+        probe_obs.append(np.asarray(prev_obs, dtype=np.float64).reshape(-1))
+        probe_next_obs.append(np.asarray(obs, dtype=np.float64).reshape(-1))
+        probe_acts.append(act_vec)
+        probe_dones.append(bool(term or trunc))
 
         if isinstance(info.get("reward_terms"), dict) and info["reward_terms"]:
             saw_reward_terms = True
@@ -384,6 +444,29 @@ def preflight_env(
         recommendations.append(
             "Consider returning `info['reward_terms']` and `info['task_metrics']` from env_wrapper.py so Stage 3 Auditor can catch Reward Hacking."
         )
+
+    probe_report_gym: MDPProbeReport | None = None
+    if run_probes and probe_obs and not errors:
+        probe_report_gym = probe_transition_batch(
+            np.vstack(probe_obs),
+            np.vstack(probe_acts),
+            np.asarray(rews[: len(probe_obs)], dtype=np.float64),
+            np.vstack(probe_next_obs),
+            np.asarray(probe_dones, dtype=np.bool_),
+            reset_obs_samples=np.vstack(reset_samples) if reset_samples else None,
+            masks=np.vstack(probe_masks) if len(probe_masks) == len(probe_obs) else None,
+            n_permutations=40,
+            seed=seed,
+        )
+        for msg in probe_report_gym.warnings:
+            if msg not in warnings:
+                warnings.append(msg)
+        for msg in probe_report_gym.errors:
+            if msg not in errors:
+                errors.append(msg)
+        for msg in probe_report_gym.recommendations:
+            if msg not in recommendations:
+                recommendations.append(msg)
 
     # 3. Baseline sanity floors
     rand_stats_single: EpisodeEvalStats | None = (
@@ -422,6 +505,7 @@ def preflight_env(
             "completed_episodes_in_probe": len(ep_lengths),
             **({"is_vector_env": True, "num_envs": env.num_envs} if env.is_vector_env else {}),
             **({"action_nvec": list(env.action_nvec)} if env.action_nvec is not None else {}),
+            **({"probes": probe_report_gym.to_dict()} if probe_report_gym is not None else {}),
         },
     )
     if strict and not ok:

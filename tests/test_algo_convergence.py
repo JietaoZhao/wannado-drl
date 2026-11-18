@@ -1,4 +1,4 @@
-"""Real learning & convergence smoke tests across ALL 27 CleanRL-style algorithms in 7 families."""
+"""Real learning & convergence smoke tests across ALL 30 CleanRL-style algorithms in 8 families."""
 
 from __future__ import annotations
 
@@ -228,7 +228,7 @@ class _CoopMultiAgentContinuousEnv:
         )
 
 
-class TestAll27AlgorithmsConvergence(unittest.TestCase):
+class TestAll30AlgorithmsConvergence(unittest.TestCase):
     def test_1_tabular_classic_family_converges(self) -> None:
         env = _DiscreteTargetGridEnv()
         rand = evaluate_random_baseline(env, num_episodes=8, seed=0)
