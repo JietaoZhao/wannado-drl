@@ -849,6 +849,7 @@ class VectorizedEnvAdapter:
         if is_factory and self._eval_factory is None:
             self._eval_factory = env_or_factory
 
+        self.raw_env: Any
         if is_factory and int(num_envs) > 1:
             n_req = int(num_envs)
             env_fns = [env_or_factory for _ in range(n_req)]
