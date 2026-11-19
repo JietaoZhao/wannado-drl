@@ -153,10 +153,16 @@ def train_dueling_dqn(
         b_rew: torch.Tensor,
         b_next: Any,
         b_term: torch.Tensor,
+        b_next_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, float]:
         # [AI-Prompt Hook]: Combine Dueling V+A head with Double-DQN target decoupling.
         with torch.no_grad():
-            best_next_act = q_net(b_next).argmax(dim=1, keepdim=True)
+            online_next_q = q_net(b_next)
+            if b_next_mask is not None:
+                valid_row = b_next_mask.any(dim=1, keepdim=True)
+                safe_mask = torch.where(valid_row, b_next_mask, torch.ones_like(b_next_mask))
+                online_next_q = online_next_q.masked_fill(~safe_mask, -1e9)
+            best_next_act = online_next_q.argmax(dim=1, keepdim=True)
             next_q = target_net(b_next).gather(1, best_next_act).squeeze(1)
             td_target = b_rew + cfg.gamma * (1.0 - b_term) * next_q
         q_pred = q_net(b_obs).gather(1, b_act.unsqueeze(1)).squeeze(1)

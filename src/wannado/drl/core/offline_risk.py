@@ -251,24 +251,26 @@ def evaluate_offline_wis(
         step_rhos = np.clip(raw_rho, 1e-3, float(clip_rho))
 
     beh_returns: list[float] = []
-    ep_weights: list[float] = []
-    ep_weighted_returns: list[float] = []
+    ep_log_weights: list[float] = []
     for idx in episodes:
         rews = dataset.rewards[idx].astype(np.float64)
         discounts = float(gamma) ** np.arange(rews.size, dtype=np.float64)
         g_ret = float(np.sum(discounts * rews))
         beh_returns.append(g_ret)
 
-        # Geometric mean per-step importance ratio prevents long-horizon weight collapse in WIS
-        rhos_ep = np.clip(step_rhos[idx], 1e-4, float(clip_rho))
-        w_ep = float(np.exp(np.clip(np.mean(np.log(rhos_ep)), -4.0, 4.0)))
-        ep_weights.append(w_ep)
-        ep_weighted_returns.append(w_ep * g_ret)
+        # Exact trajectory importance weight w_i = prod_t rho_t in log space with log-sum-exp stabilization
+        rhos_ep = np.clip(step_rhos[idx], 1e-6, float(clip_rho))
+        log_w_ep = float(np.clip(np.sum(np.log(rhos_ep)), -50.0, 50.0))
+        ep_log_weights.append(log_w_ep)
 
-    w_arr = np.asarray(ep_weights, dtype=np.float64)
-    w_sum = max(float(np.sum(w_arr)), 1e-8)
-    wis_ret = float(np.sum(ep_weighted_returns) / w_sum)
-    ess = float((w_sum * w_sum) / max(float(np.sum(w_arr * w_arr)), 1e-8))
+    if ep_log_weights:
+        log_w_arr = np.asarray(ep_log_weights, dtype=np.float64)
+        w_arr = np.exp(log_w_arr - float(np.max(log_w_arr)))
+        w_sum = max(float(np.sum(w_arr)), 1e-12)
+        wis_ret = float(np.sum(w_arr * np.asarray(beh_returns, dtype=np.float64)) / w_sum)
+        ess = float((w_sum * w_sum) / max(float(np.sum(w_arr * w_arr)), 1e-12))
+    else:
+        wis_ret, ess = 0.0, 0.0
     return {
         "behavior_return": float(np.mean(beh_returns)) if beh_returns else 0.0,
         "wis_return": wis_ret,
@@ -378,8 +380,20 @@ def evaluate_offline_fqe(
             q_all = q_net(obs_to_tensor(slice_obs(obs_norm, slice(0, len(all_acts))), obs_spec, dev, add_batch_dim=False))
             mean_q = float(q_all.gather(1, torch.as_tensor(all_acts, device=dev).unsqueeze(1)).squeeze(1).mean().item())
     else:
-        q_net_c = TwinQCritic(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
-        target_net_c = TwinQCritic(obs_spec, dataset.action_dim, hidden_dims=hidden_dims).to(dev)
+        q_net_c = TwinQCritic(
+            obs_spec,
+            dataset.action_dim,
+            hidden_dims=hidden_dims,
+            action_low=dataset.action_low,
+            action_high=dataset.action_high,
+        ).to(dev)
+        target_net_c = TwinQCritic(
+            obs_spec,
+            dataset.action_dim,
+            hidden_dims=hidden_dims,
+            action_low=dataset.action_low,
+            action_high=dataset.action_high,
+        ).to(dev)
         hard_update(q_net_c, target_net_c)
         opt_c = torch.optim.Adam(q_net_c.parameters(), lr=lr)
 
@@ -452,15 +466,16 @@ def evaluate_offline_ope(
                 if idx.size == 0:
                     continue
                 sub_ds = OfflineTransitionDataset(
-                    obs=dataset.obs[idx],
+                    obs=slice_obs(dataset.obs, idx),
                     actions=dataset.actions[idx],
                     rewards=dataset.rewards[idx],
-                    next_obs=dataset.next_obs[idx],
+                    next_obs=slice_obs(dataset.next_obs, idx),
                     terminateds=dataset.terminateds[idx],
                     is_discrete=dataset.is_discrete,
                     action_dim=dataset.action_dim,
                     action_low=dataset.action_low,
                     action_high=dataset.action_high,
+                    obs_spec=dataset.obs_spec,
                     extra={
                         k: v[idx]
                         for k, v in dataset.extra.items()

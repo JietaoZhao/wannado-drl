@@ -142,6 +142,8 @@ def train_sac(
             env.obs_spec,
             env.action_dim,
             cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -149,6 +151,8 @@ def train_sac(
             env.obs_spec,
             env.action_dim,
             cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -158,6 +162,8 @@ def train_sac(
         critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
         log_alpha = torch.tensor(float(np.log(cfg.init_alpha)), device=dev, requires_grad=cfg.autotune_alpha)
         alpha_opt = torch.optim.Adam([log_alpha], lr=cfg.alpha_lr) if cfg.autotune_alpha else None
+        act_scale = np.maximum((env.action_high - env.action_low) / 2.0, 1e-6)
+        target_entropy = -float(env.action_dim) + float(np.sum(np.log(act_scale)))
 
         state.update(
             {
@@ -168,7 +174,7 @@ def train_sac(
                 "critic_opt": critic_opt,
                 "log_alpha": log_alpha,
                 "alpha_opt": alpha_opt,
-                "target_entropy": -float(env.action_dim),
+                "target_entropy": target_entropy,
             }
         )
         policy_spec = {

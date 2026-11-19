@@ -162,12 +162,17 @@ def train_c51(
         b_rew: torch.Tensor,
         b_next: Any,
         b_term: torch.Tensor,
+        b_next_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, float]:
         bsz = int(b_act.shape[0])
         dev = b_act.device
         # [AI-Prompt Hook]: Categorical Bellman projection onto fixed [v_min, v_max] atom grid.
         with torch.no_grad():
             next_q_vals = target_net.get_q_values(b_next)
+            if b_next_mask is not None:
+                valid_row = b_next_mask.any(dim=1, keepdim=True)
+                safe_mask = torch.where(valid_row, b_next_mask, torch.ones_like(b_next_mask))
+                next_q_vals = next_q_vals.masked_fill(~safe_mask, -1e9)
             next_act = next_q_vals.argmax(dim=1)
             next_probs = target_net.get_probs(b_next)[torch.arange(bsz, device=dev), next_act]
 

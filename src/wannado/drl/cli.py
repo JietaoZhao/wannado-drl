@@ -158,6 +158,9 @@ def _build_parser() -> argparse.ArgumentParser:
             "multi_agent_coop",
             "reasoning_sequence",
             "offline_control",
+            "finance_portfolio_risk",
+            "clinical_offline_safety",
+            "cyber_attack_defense",
         ],
     )
     p_intake.add_argument("--name", default=None, help="Optional problem name.")

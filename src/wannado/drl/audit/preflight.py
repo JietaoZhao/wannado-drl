@@ -123,11 +123,33 @@ def preflight_env(
         n = len(probe_target)
         if n < 2:
             errors.append("OfflineTransitionDataset contains fewer than 2 transitions.")
-        if not np.all(np.isfinite(probe_target.obs)) or not np.all(np.isfinite(probe_target.next_obs)):
+
+        def _obs_all_finite(arr_or_dict: Any) -> bool:
+            if isinstance(arr_or_dict, dict):
+                return all(bool(np.all(np.isfinite(np.asarray(v)))) for v in arr_or_dict.values())
+            return bool(np.all(np.isfinite(np.asarray(arr_or_dict))))
+
+        def _obs_max_abs(arr_or_dict: Any) -> float:
+            if isinstance(arr_or_dict, dict):
+                vals = [float(np.max(np.abs(np.asarray(v)))) for v in arr_or_dict.values() if np.asarray(v).size]
+                return max(vals) if vals else 0.0
+            arr = np.asarray(arr_or_dict)
+            return float(np.max(np.abs(arr))) if arr.size else 0.0
+
+        def _obs_prefix_2d(arr_or_dict: Any, limit: int) -> np.ndarray:
+            if isinstance(arr_or_dict, dict):
+                parts = [
+                    np.asarray(v[:limit], dtype=np.float64).reshape(limit, -1)
+                    for _, v in sorted(arr_or_dict.items())
+                ]
+                return np.hstack(parts) if parts else np.zeros((limit, 0), dtype=np.float64)
+            return np.asarray(arr_or_dict[:limit], dtype=np.float64).reshape(limit, -1)
+
+        if not _obs_all_finite(probe_target.obs) or not _obs_all_finite(probe_target.next_obs):
             errors.append("OfflineTransitionDataset contains NaN or Inf observations.")
         if not np.all(np.isfinite(probe_target.rewards)):
             errors.append("OfflineTransitionDataset contains NaN or Inf rewards.")
-        obs_abs_max = float(np.max(np.abs(probe_target.obs))) if probe_target.obs.size else 0.0
+        obs_abs_max = _obs_max_abs(probe_target.obs)
         max_abs_r = float(np.max(np.abs(probe_target.rewards))) if probe_target.rewards.size else 0.0
         if max_abs_r > 100.0:
             warnings.append(
@@ -179,13 +201,14 @@ def preflight_env(
                 if trunc_arr is not None
                 else (probe_target.terminateds > 0.5)
             )
+            n_lim = min(n, 256)
             probe_report = probe_transition_batch(
-                probe_target.obs[: min(n, 256)],
-                probe_target.actions[: min(n, 256)],
-                probe_target.rewards[: min(n, 256)],
-                probe_target.next_obs[: min(n, 256)],
-                off_dones[: min(n, 256)],
-                masks=probe_target.extra["action_masks"][: min(n, 256)] if "action_masks" in probe_target.extra else None,
+                _obs_prefix_2d(probe_target.obs, n_lim),
+                probe_target.actions[:n_lim],
+                probe_target.rewards[:n_lim],
+                _obs_prefix_2d(probe_target.next_obs, n_lim),
+                off_dones[:n_lim],
+                masks=probe_target.extra["action_masks"][:n_lim] if "action_masks" in probe_target.extra else None,
                 n_permutations=30,
                 seed=seed,
             )

@@ -164,9 +164,17 @@ def train_sac_lagrangian(
         device=dev,
     )
     env, obs_rms, ret_rms = ctx.env, ctx.obs_rms, ctx.ret_rms
-    if env.is_discrete or env.action_nvec is not None or env.action_low is None or env.action_high is None:
+    if (
+        env.is_discrete
+        or env.action_nvec is not None
+        or env.action_low is None
+        or env.action_high is None
+        or not np.all(np.isfinite(env.action_low))
+        or not np.all(np.isfinite(env.action_high))
+        or np.any(env.action_high <= env.action_low)
+    ):
         ctx.env.close()
-        raise ValueError("sac_lagrangian requires bounded continuous Box action spaces.")
+        raise ValueError("sac_lagrangian requires finite bounded continuous Box action spaces.")
 
     actor = SquashedGaussianActor(
         env.obs_spec,
@@ -181,6 +189,8 @@ def train_sac_lagrangian(
         env.obs_spec,
         env.action_dim,
         cfg.hidden_dims,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -188,6 +198,8 @@ def train_sac_lagrangian(
         env.obs_spec,
         env.action_dim,
         cfg.hidden_dims,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -197,6 +209,8 @@ def train_sac_lagrangian(
         env.obs_spec,
         env.action_dim,
         cfg.hidden_dims,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -204,6 +218,8 @@ def train_sac_lagrangian(
         env.obs_spec,
         env.action_dim,
         cfg.hidden_dims,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -214,7 +230,8 @@ def train_sac_lagrangian(
     cost_critic_opt = torch.optim.Adam(cost_critic.parameters(), lr=cfg.cost_critic_lr)
     log_alpha = torch.tensor(float(np.log(cfg.init_alpha)), device=dev, requires_grad=cfg.autotune_alpha)
     alpha_opt = torch.optim.Adam([log_alpha], lr=cfg.alpha_lr) if cfg.autotune_alpha else None
-    target_entropy = -float(env.action_dim)
+    act_scale = np.maximum((env.action_high - env.action_low) / 2.0, 1e-6)
+    target_entropy = -float(env.action_dim) + float(np.sum(np.log(act_scale)))
 
     replay = ReplayBuffer(cfg.buffer_size, env.obs_spec, env.action_dim, discrete_action=False, device=dev, track_costs=True)
 
@@ -257,7 +274,7 @@ def train_sac_lagrangian(
         extra_out=resumed_extra,
     )
     lagrange_lambda = float(resumed_extra.get("lagrange_lambda", max(0.0, cfg.init_lambda)))
-    pid_i = float(resumed_extra.get("pid_i", max(0.0, lagrange_lambda / max(cfg.pid_ki, 1e-4))))
+    pid_i = float(resumed_extra.get("pid_i", float(np.clip(lagrange_lambda, 0.0, cfg.max_lambda))))
     prev_cost_err: float | None = resumed_extra.get("prev_cost_err")
 
     t0 = time.perf_counter()
@@ -275,7 +292,7 @@ def train_sac_lagrangian(
         nonlocal lagrange_lambda, pid_i, prev_cost_err
         err = float(measured_ep_cost) - float(cfg.cost_limit)
         pid_p = cfg.pid_kp * err
-        pid_i = max(0.0, pid_i + cfg.pid_ki * err)
+        pid_i = float(np.clip(pid_i + cfg.pid_ki * err, 0.0, cfg.max_lambda))
         pid_d = cfg.pid_kd * max(0.0, err - prev_cost_err) if prev_cost_err is not None else 0.0
         prev_cost_err = err
         lagrange_lambda = float(np.clip(pid_p + pid_i + pid_d, 0.0, cfg.max_lambda))
@@ -309,8 +326,7 @@ def train_sac_lagrangian(
         if step_has_cost:
             saw_cost_signal = True
 
-        next_proc = obs_rms.normalize(sb.final_obs) if obs_rms is not None else sb.final_obs
-        replay.add_batch(obs_proc, acts, train_rewards, next_proc, sb.terminateds, valid_mask=sb.valid_transition, costs=step_costs)
+        replay.add_batch(obs, acts, train_rewards, sb.final_obs, sb.terminateds, valid_mask=sb.valid_transition, costs=step_costs)
 
         for slot in range(env.num_envs):
             if not sb.valid_transition[slot]:
@@ -334,7 +350,9 @@ def train_sac_lagrangian(
 
         if steps >= next_train_step and replay.size >= cfg.batch_size:
             for _ in range(grad_steps):
-                b_obs, b_act, b_rew, b_next, b_term, b_cost = replay.sample_with_costs(cfg.batch_size, rng=rng)
+                b_obs, b_act, b_rew, b_next, b_term, b_cost = replay.sample_with_costs(
+                    cfg.batch_size, rng=rng, obs_rms=obs_rms
+                )
                 alpha = log_alpha.exp().detach()
                 with torch.no_grad():
                     next_a, next_lp = actor.get_action(b_next)

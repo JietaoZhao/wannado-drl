@@ -158,9 +158,17 @@ def train_hil_serl(
         device=dev,
     )
     env, obs_rms, ret_rms = ctx.env, ctx.obs_rms, ctx.ret_rms
-    if env.is_discrete or env.action_nvec is not None or env.action_low is None or env.action_high is None:
+    if (
+        env.is_discrete
+        or env.action_nvec is not None
+        or env.action_low is None
+        or env.action_high is None
+        or not np.all(np.isfinite(env.action_low))
+        or not np.all(np.isfinite(env.action_high))
+        or np.any(env.action_high <= env.action_low)
+    ):
         ctx.env.close()
-        raise ValueError("hil_serl requires bounded continuous Box action spaces.")
+        raise ValueError("hil_serl requires finite bounded continuous Box action spaces.")
 
     actor = SquashedGaussianActor(
         env.obs_spec,
@@ -176,6 +184,8 @@ def train_hil_serl(
         env.action_dim,
         cfg.hidden_dims,
         use_layer_norm=True,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -184,6 +194,8 @@ def train_hil_serl(
         env.action_dim,
         cfg.hidden_dims,
         use_layer_norm=True,
+        action_low=env.action_low,
+        action_high=env.action_high,
         extractor_type=cfg.extractor_type,
         extractor_kwargs=cfg.extractor_kwargs,
     ).to(dev)
@@ -193,7 +205,8 @@ def train_hil_serl(
     critic_opt = torch.optim.Adam(critic.parameters(), lr=cfg.critic_lr)
     log_alpha = torch.tensor(float(np.log(cfg.init_alpha)), device=dev, requires_grad=cfg.autotune_alpha)
     alpha_opt = torch.optim.Adam([log_alpha], lr=cfg.alpha_lr) if cfg.autotune_alpha else None
-    target_entropy = -float(env.action_dim)
+    act_scale = np.maximum((env.action_high - env.action_low) / 2.0, 1e-6)
+    target_entropy = -float(env.action_dim) + float(np.sum(np.log(act_scale)))
 
     replay = DualDemoReplayBuffer(cfg.buffer_size, env.obs_spec, env.action_dim, discrete_action=False, device=dev)
     policy_spec = {
@@ -230,16 +243,13 @@ def train_hil_serl(
     )
     intervention_count = int(resumed_extra.get("human_interventions", 0))
 
-    # Preload initial offline demonstrations into demo buffer if not already restored from replay sidecar
+    # Preload initial offline demonstrations (raw obs; normalized dynamically on sample) if not restored from replay
     if demo_dataset is not None and replay.demo_buffer.size == 0:
         for i in range(len(demo_dataset)):
             o = slice_obs(demo_dataset.obs, i)
             no = slice_obs(demo_dataset.next_obs, i)
-            if obs_rms is not None:
-                if steps == 0:
-                    obs_rms.update(o)
-                o = obs_rms.normalize(o)
-                no = obs_rms.normalize(no)
+            if obs_rms is not None and steps == 0:
+                obs_rms.update(o)
             replay.add_demo(o, demo_dataset.actions[i], float(demo_dataset.rewards[i]), no, bool(demo_dataset.terminateds[i]))
 
     t0 = time.perf_counter()
@@ -276,15 +286,14 @@ def train_hil_serl(
         sb = env.step_batch(acts)
         valid_count = int(np.sum(sb.valid_transition))
         train_rewards = ret_rms.normalize_batch(sb.rewards, sb.dones) if ret_rms is not None else sb.rewards
-        next_proc = obs_rms.normalize(sb.final_obs) if obs_rms is not None else sb.final_obs
-        replay.add_online_batch(obs_proc, acts, train_rewards, next_proc, sb.terminateds, valid_mask=sb.valid_transition)
+        replay.add_online_batch(obs, acts, train_rewards, sb.final_obs, sb.terminateds, valid_mask=sb.valid_transition)
         for i in intervened_slots:
             if bool(sb.valid_transition[i]):
                 replay.add_demo(
-                    slice_obs(obs_proc, i),
+                    slice_obs(obs, i),
                     acts[i],
                     float(train_rewards[i]),
-                    slice_obs(next_proc, i),
+                    slice_obs(sb.final_obs, i),
                     bool(sb.terminateds[i]),
                 )
         steps += valid_count
@@ -303,7 +312,7 @@ def train_hil_serl(
             n_updates = max(1, cfg.utd_ratio * max(1, valid_count))
             for u in range(n_updates):
                 b_obs, b_act, b_rew, b_next, b_term = replay.sample_symmetric(
-                    cfg.batch_size, demo_fraction=cfg.demo_fraction, rng=rng
+                    cfg.batch_size, demo_fraction=cfg.demo_fraction, rng=rng, obs_rms=obs_rms
                 )
                 alpha = log_alpha.exp().detach()
                 with torch.no_grad():

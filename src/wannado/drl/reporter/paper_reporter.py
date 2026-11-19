@@ -700,7 +700,7 @@ def evaluate_drl_suite(
                 cfg_copy = type(cfg_obj)(**cfg_kwargs)
                 res = fn(env_or_factory, config=cfg_copy)
             else:
-                default_cfg = build_algo_config(aid, seed=int(s), device=device)
+                default_cfg = build_algo_config(aid, seed=int(s), device=device, eval_episodes=int(eval_episodes))
                 res = fn(env_or_factory, config=default_cfg) if default_cfg is not None else fn(env_or_factory)
             seed_runs.append(res)
 

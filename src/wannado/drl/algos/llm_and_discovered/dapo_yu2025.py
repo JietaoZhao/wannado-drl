@@ -119,8 +119,9 @@ def train_dapo(
     rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
 
+    max_seq_len = max(128, int(task.prompt_len) + int(task.max_response_len) + 8)
     model = policy if policy is not None else AutoregressiveSeqPolicy(
-        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim
+        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim, max_seq_len=max_seq_len
     ).to(dev)
     optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
 
@@ -152,7 +153,11 @@ def train_dapo(
                 grp_rews = []
                 for j in range(sl.start, sl.stop):
                     r_raw, _ = task.score_sequence(prompts_rep[j], resp_np[j])
-                    eff_len = int(np.sum(resp_np[j] != task.eos_token_id)) if task.eos_token_id is not None else len(resp_np[j])
+                    if task.eos_token_id is not None:
+                        eos_pos = np.flatnonzero(resp_np[j] == task.eos_token_id)
+                        eff_len = int(eos_pos[0]) + 1 if eos_pos.size > 0 else len(resp_np[j])
+                    else:
+                        eff_len = len(resp_np[j])
                     r_shaped = _apply_overlong_shaping(
                         r_raw, eff_len, task.max_response_len, cfg.soft_overlong_cache, cfg.overlong_penalty
                     )
@@ -178,15 +183,11 @@ def train_dapo(
         b_adv = torch.cat(kept_advs, dim=0)
         kept_fraction_hist.append(min(1.0, float(len(kept_prompts)) / max(1, cfg.prompts_per_batch * attempts)))
 
-        valid_mask = (
-            (b_resps != task.eos_token_id).float()
-            if task.eos_token_id is not None
-            else torch.ones_like(b_resps, dtype=torch.float32)
-        )
+        valid_mask = AutoregressiveSeqPolicy.eos_valid_mask(b_resps, task.eos_token_id)
         token_denom = valid_mask.sum().clamp(min=1.0)
 
         for _ in range(cfg.update_epochs):
-            new_lps, entropy = model.sequence_logprobs_and_entropy(b_prompts, b_resps)
+            new_lps, entropy = model.sequence_logprobs_and_entropy(b_prompts, b_resps, temperature=cfg.temperature)
             ratio = torch.exp(new_lps - b_old_lps)
             # [AI-Prompt Hook]: Clip-Higher asymmetric bounds + Token-Level Policy Gradient Loss.
             clipped_ratio = torch.clamp(ratio, 1.0 - cfg.clip_low, 1.0 + cfg.clip_high)
@@ -197,7 +198,7 @@ def train_dapo(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            ent_hist.append(float(entropy.mean().item()))
+            ent_hist.append(float(((entropy * valid_mask).sum() / token_denom).item()))
 
         if step % max(1, cfg.total_updates // 10) == 0 or step == cfg.total_updates:
             learning_curve.append({"step": float(step), "episode_return": float(np.mean(all_raw_rews))})

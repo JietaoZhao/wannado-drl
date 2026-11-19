@@ -2,6 +2,23 @@
 
 All notable changes to `wannado-drl` will be documented in this file.
 
+## [1.1.1] - 2026-11-19
+
+### Fixed
+- **Continuous CQL log-sum-exp & importance sampling (`algos/offline_rl/cql_kumar2020.py`)**: Evaluated random and policy candidate actions separately to eliminate cross-state `(B, 2K)` row scrambling and applied exact Kumar et al. (2020, Appendix F) importance-sampling log-density corrections.
+- **SAC-Lagrangian PID initialization & anti-windup (`algos/safe_constrained/sac_lagrangian_stooke2020.py`)**: Fixed `pid_i` initialization (removed erroneous division by `pid_ki`) and clamped the integral accumulator to `[0, max_lambda]` to prevent integrator windup.
+- **Vectorized terminal `final_info` preservation (`core/wrappers.py`)**: Extracted and merged Gymnasium `final_info` (both array-of-dicts and dict-of-arrays layouts) on episode completion so terminal `cost`, `task_metrics`, and `reward_terms` are never lost on autoreset.
+- **Masked next-state Bellman targets in DQN family (`core/buffers.py`, `core/algo_helpers.py`, `dqn`, `double_dqn`, `dueling_dqn`, `c51`)**: Tracked `next_action_masks` in `ReplayBuffer` and masked illegal next-state actions before `max`/`argmax` in Bellman updates.
+- **TRPO multi-dimensional continuous KL (`algos/policy_gradient/trpo_schulman2015.py`)**: Summed Gaussian KL across action dimensions before batch averaging in both Fisher-vector products and backtracking line search.
+- **Sequence RL temperature consistency, long horizons & cumulative EOS masking (`core/networks.py`, `grpo`, `dapo`, `gspo`, `arpo`)**: Added `temperature` scaling to `sequence_logprobs_and_entropy()`, sized positional embeddings dynamically to `prompt_len + max_response_len + 8`, and applied cumulative post-first-EOS token masks (`AutoregressiveSeqPolicy.eos_valid_mask`).
+- **DiscoRL continuous bounds & truncation credit isolation (`algos/llm_and_discovered/discorl_oh2025.py`)**: Added affine `tanh` box-bound scaling to `DiscoAgentNet` and reset backward meta-GRU hidden states and outer validation returns across both `terminated` and `truncated` boundaries.
+- **Reproducibility & Replay Buffer hygiene (`core/utils.py`, `core/buffers.py`, `core/algo_helpers.py`, `core/networks.py`, `sac`, `td3`, `ddpg`, `hil_serl`, `sac_lagrangian`)**: Enabled `torch.use_deterministic_algorithms(True, warn_only=True)` when `deterministic_torch=True`, implemented `DualDemoReplayBuffer.state_dict()`/`load_state_dict()`, stored raw observations in off-policy replay buffers with dynamic `obs_rms` normalization on sample, added finite Box-bound guards, normalized critic action inputs to `[-1, 1]`, and added Jacobian-consistent `target_entropy` scaling for SAC-family trainers.
+- **External adapter, Dict offline datasets, MultiDiscrete (>256) masks & Rigor Probes (`audit/external_adapter.py`, `audit/preflight.py`, `core/offline_risk.py`, `audit/probes.py`, `audit/rigor_auditor.py`, `core/provenance.py`, `cli.py`, `reporter/paper_reporter.py`)**:
+  - Auto-detected image/Dict observation spaces and CHW/HWC 3D tensors in `ExternalPolicyWrapper`, tracked `mean_cost` during evaluation, and actively verified `obs_rms` invariance across eval episodes.
+  - Added full `Dict` observation support to `preflight_env(OfflineTransitionDataset)` and `evaluate_offline_ope` subgroup slicing, and replaced geometric-mean WIS with log-sum-exp stabilized exact trajectory importance weights.
+  - Enabled factorized `action_mask` propagation for large `MultiDiscrete (>256)` across `UniversalGymAdapter`, `VectorizedEnvAdapter`, and all 6 on-policy algorithms.
+  - Lifted the `obs_dim <= 64` ceiling on Probes B/C, added nonlinear `sign(delta)` innovation detection, checked all tracked KPIs for reward-hacking divergence, accepted `"impala"`/`"set_attention"` extractor aliases, corrected `c51`/`cql`/`iql_offline` provenance flags, exposed all 9 intake archetypes in `wannado-drl intake`, and forwarded `eval_episodes` in `evaluate_drl_suite()`.
+
 ## [1.1.0] - 2026-11-18
 
 ### Added

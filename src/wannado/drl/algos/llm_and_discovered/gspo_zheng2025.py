@@ -106,8 +106,9 @@ def train_gspo(
     rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
 
+    max_seq_len = max(128, int(task.prompt_len) + int(task.max_response_len) + 8)
     model = policy if policy is not None else AutoregressiveSeqPolicy(
-        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim
+        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim, max_seq_len=max_seq_len
     ).to(dev)
     ref_model = copy.deepcopy(model).to(dev)
     ref_model.eval()
@@ -127,7 +128,7 @@ def train_gspo(
 
         with torch.no_grad():
             responses_t, old_lps = model.generate(prompts_t, task.max_response_len, temperature=cfg.temperature)
-            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(prompts_t, responses_t)
+            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(prompts_t, responses_t, temperature=cfg.temperature)
 
         resp_np = responses_t.cpu().numpy()
         total_rollouts += int(resp_np.shape[0])
@@ -139,15 +140,12 @@ def train_gspo(
         adv_grp = (rews_grp - rews_grp.mean(axis=1, keepdims=True)) / (rews_grp.std(axis=1, keepdims=True) + 1e-6)
         adv_t = torch.as_tensor(adv_grp.reshape(-1), device=dev, dtype=torch.float32)
 
-        valid_mask = (
-            (responses_t != task.eos_token_id).float()
-            if task.eos_token_id is not None
-            else torch.ones_like(responses_t, dtype=torch.float32)
-        )
+        valid_mask = AutoregressiveSeqPolicy.eos_valid_mask(responses_t, task.eos_token_id)
         seq_lengths = valid_mask.sum(dim=1).clamp(min=1.0)
+        mask_denom = valid_mask.sum().clamp(min=1.0)
 
         for _ in range(cfg.update_epochs):
-            new_lps, entropy = model.sequence_logprobs_and_entropy(prompts_t, responses_t)
+            new_lps, entropy = model.sequence_logprobs_and_entropy(prompts_t, responses_t, temperature=cfg.temperature)
             # [AI-Prompt Hook]: Length-normalized sequence importance ratio s_i(theta) and sequence-level clipping.
             mean_log_ratio = ((new_lps - old_lps) * valid_mask).sum(dim=1) / seq_lengths
             seq_ratio = torch.exp(mean_log_ratio.clamp(-5.0, 5.0))
@@ -162,7 +160,7 @@ def train_gspo(
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            ent_hist.append(float(entropy.mean().item()))
+            ent_hist.append(float(((entropy * valid_mask).sum() / mask_denom).item()))
             seq_ratio_hist.append(float(seq_ratio.mean().item()))
 
         if step % max(1, cfg.total_updates // 10) == 0 or step == cfg.total_updates:

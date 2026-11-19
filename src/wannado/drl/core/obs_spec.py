@@ -12,7 +12,7 @@ from gymnasium import spaces
 ObsKind = Literal["vector", "image", "entities", "dict"]
 LeafKind = Literal["vector", "image", "entities"]
 
-_CNN_EXTRACTOR_ALIASES = {"nature_cnn", "impala_cnn", "small_cnn", "cnn"}
+_CNN_EXTRACTOR_ALIASES = {"nature_cnn", "impala_cnn", "impala", "small_cnn", "cnn"}
 _ENTITY_KEY_HINTS = ("entit", "asset", "user", "agent", "node", "token", "target", "ue")
 
 
@@ -129,7 +129,7 @@ def _infer_leaf_spec(
                 flat_dim=int(h * w),
             )
         is_entity_key = any(hint in key.lower() for hint in _ENTITY_KEY_HINTS)
-        if (extractor_type == "attention" or mask_key is not None or (extractor_type in ("auto", "dict") and is_entity_key)) and h >= 1 and w >= 1:
+        if (extractor_type in ("attention", "set_attention") or mask_key is not None or (extractor_type in ("auto", "dict") and is_entity_key)) and h >= 1 and w >= 1:
             return LeafObsSpec(
                 key=key,
                 kind="entities",

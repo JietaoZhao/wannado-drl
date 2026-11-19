@@ -207,6 +207,8 @@ def train_iql_offline(
             obs_spec,
             dataset.action_dim,
             cfg.hidden_dims,
+            action_low=act_low,
+            action_high=act_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -214,6 +216,8 @@ def train_iql_offline(
             obs_spec,
             dataset.action_dim,
             cfg.hidden_dims,
+            action_low=act_low,
+            action_high=act_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -378,4 +382,5 @@ def train_iql_offline(
         eval_episodes=cfg.eval_episodes,
         seed=cfg.seed,
         rng=rng,
+        explicit_optimizations=[] if dataset.is_discrete else ["clipped_double_q"],
     )

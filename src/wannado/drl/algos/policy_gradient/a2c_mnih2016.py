@@ -155,7 +155,7 @@ def train_a2c(
         env.obs_spec,
         act_shape,
         action_dtype=act_dtype,
-        mask_dim=env.action_dim if env.is_discrete else None,
+        mask_dim=env.action_dim if (env.is_discrete or env.action_nvec is not None) else None,
         num_envs=env.num_envs,
         batched=True,
     )
@@ -188,7 +188,7 @@ def train_a2c(
                 saw_action_mask = True
             mask_t = torch.as_tensor(mask_batch, device=dev, dtype=torch.bool) if mask_batch is not None else None
             with torch.no_grad():
-                if env.is_discrete:
+                if env.is_discrete or env.action_nvec is not None:
                     act_t, lp_t, _, val_t = net.get_action_and_value(obs_t, action_mask=mask_t)
                 else:
                     act_t, lp_t, _, val_t = net.get_action_and_value(obs_t)
@@ -214,7 +214,11 @@ def train_a2c(
                 val_t.cpu().numpy(),
                 action_masks=mask_batch
                 if mask_batch is not None
-                else (np.ones((env.num_envs, env.action_dim), dtype=np.bool_) if env.is_discrete else None),
+                else (
+                    np.ones((env.num_envs, env.action_dim), dtype=np.bool_)
+                    if (env.is_discrete or env.action_nvec is not None)
+                    else None
+                ),
                 dones=sb.dones,
                 valid_mask=sb.valid_transition,
             )
@@ -238,7 +242,7 @@ def train_a2c(
         b_obs, b_act, _, b_adv, b_ret, b_mask, b_vals = buffer.flatten_batch(dev)
         if b_adv.numel() == 0:
             break
-        if env.is_discrete:
+        if env.is_discrete or env.action_nvec is not None:
             _, new_lp, entropy, new_val = net.get_action_and_value(b_obs, action=b_act, action_mask=b_mask)
         else:
             _, new_lp, entropy, new_val = net.get_action_and_value(b_obs, action=b_act)

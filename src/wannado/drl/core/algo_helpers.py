@@ -658,7 +658,17 @@ def run_value_based_loop(
     q_net, target_net, policy_spec = build_q_nets(ctx, dev)
     hard_update(q_net, target_net)
     optimizer = torch.optim.Adam(q_net.parameters(), lr=cfg.lr)
-    replay = ReplayBuffer(cfg.buffer_size, env.obs_spec, env.action_dim, discrete_action=True, device=dev)
+    replay = ReplayBuffer(
+        cfg.buffer_size,
+        env.obs_spec,
+        env.action_dim,
+        discrete_action=True,
+        device=dev,
+        track_next_masks=True,
+    )
+    import inspect
+
+    _loss_accepts_next_mask = len(inspect.signature(loss_fn).parameters) >= 8
 
     cfg_dict = asdict(cfg)
     models_map: dict[str, Any] = {"q_net": q_net, "target_net": target_net}
@@ -709,8 +719,15 @@ def run_value_based_loop(
         sb = env.step_batch(acts)
         valid_count = int(np.sum(sb.valid_transition))
         train_rewards = ret_rms.normalize_batch(sb.rewards, sb.dones) if ret_rms is not None else sb.rewards
-        next_proc = obs_rms.normalize(sb.final_obs) if obs_rms is not None else sb.final_obs
-        replay.add_batch(obs_proc, acts, train_rewards, next_proc, sb.terminateds, valid_mask=sb.valid_transition)
+        replay.add_batch(
+            obs,
+            acts,
+            train_rewards,
+            sb.final_obs,
+            sb.terminateds,
+            valid_mask=sb.valid_transition,
+            next_action_masks=sb.action_masks,
+        )
         steps += valid_count
 
         for ep_ret, _ in sb.completed_episodes:
@@ -720,11 +737,19 @@ def run_value_based_loop(
             if ctx.ckpt_mgr is not None:
                 ctx.ckpt_mgr.log_scalars(steps, {"train/episode_return": float(ep_ret), "train/epsilon": float(eps)})
         obs, mask_batch = sb.obs, sb.action_masks
+        if mask_batch is not None:
+            saw_action_mask = True
 
         if steps >= next_train_step and replay.size >= cfg.batch_size:
             for _ in range(grad_steps):
-                b_obs, b_act, b_rew, b_next, b_term = replay.sample(cfg.batch_size, rng=rng)
-                loss, q_mean = loss_fn(q_net, target_net, b_obs, b_act, b_rew, b_next, b_term)
+                b_obs, b_act, b_rew, b_next, b_term, b_nmask = replay.sample_with_next_masks(
+                    cfg.batch_size, rng=rng, obs_rms=obs_rms
+                )
+                eff_nmask = b_nmask if saw_action_mask else None
+                if _loss_accepts_next_mask:
+                    loss, q_mean = loss_fn(q_net, target_net, b_obs, b_act, b_rew, b_next, b_term, eff_nmask)
+                else:
+                    loss, q_mean = loss_fn(q_net, target_net, b_obs, b_act, b_rew, b_next, b_term)
                 optimizer.zero_grad()
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(q_net.parameters(), 10.0)
@@ -826,9 +851,17 @@ def run_offpolicy_continuous_loop(
         device=dev,
     )
     env, obs_rms, ret_rms = ctx.env, ctx.obs_rms, ctx.ret_rms
-    if env.is_discrete or env.action_nvec is not None or env.action_low is None or env.action_high is None:
+    if (
+        env.is_discrete
+        or env.action_nvec is not None
+        or env.action_low is None
+        or env.action_high is None
+        or not np.all(np.isfinite(env.action_low))
+        or not np.all(np.isfinite(env.action_high))
+        or np.any(env.action_high <= env.action_low)
+    ):
         ctx.env.close()
-        raise ValueError(f"{algo_id} requires bounded continuous Box action spaces.")
+        raise ValueError(f"{algo_id} requires finite bounded continuous Box action spaces.")
 
     actor, result_model, policy_kind, policy_spec, models_map, opts_map = build_models_fn(ctx, dev)
     replay = ReplayBuffer(cfg.buffer_size, env.obs_spec, env.action_dim, discrete_action=False, device=dev)
@@ -870,8 +903,7 @@ def run_offpolicy_continuous_loop(
         sb = env.step_batch(acts)
         valid_count = int(np.sum(sb.valid_transition))
         train_rewards = ret_rms.normalize_batch(sb.rewards, sb.dones) if ret_rms is not None else sb.rewards
-        next_proc = obs_rms.normalize(sb.final_obs) if obs_rms is not None else sb.final_obs
-        replay.add_batch(obs_proc, acts, train_rewards, next_proc, sb.terminateds, valid_mask=sb.valid_transition)
+        replay.add_batch(obs, acts, train_rewards, sb.final_obs, sb.terminateds, valid_mask=sb.valid_transition)
         steps += valid_count
 
         for ep_ret, _ in sb.completed_episodes:
@@ -885,7 +917,7 @@ def run_offpolicy_continuous_loop(
         if steps >= next_train_step and replay.size >= cfg.batch_size:
             for _ in range(grad_steps):
                 update_step += 1
-                b_obs, b_act, b_rew, b_next, b_term = replay.sample(cfg.batch_size, rng=rng)
+                b_obs, b_act, b_rew, b_next, b_term = replay.sample(cfg.batch_size, rng=rng, obs_rms=obs_rms)
                 update_fn(update_step, b_obs, b_act, b_rew, b_next, b_term)
             while next_train_step <= steps:
                 next_train_step += train_freq
@@ -1153,6 +1185,7 @@ def finalize_offline_run(
     eval_episodes: int,
     seed: int,
     rng: np.random.Generator | None = None,
+    explicit_optimizations: list[str] | None = None,
 ) -> TrainResult:
     """Build PolicyBundle, evaluate via sim or WIS OPE, save checkpoints, and emit TrainResult."""
     from wannado.drl.core.offline_risk import evaluate_offline_wis
@@ -1240,7 +1273,7 @@ def finalize_offline_run(
                 "ope_effective_sample_size": float(ope_stats["effective_sample_size"]),
             }
         )
-    opts = resolve_run_optimizations(algo_id, config=config_dict)
+    opts = resolve_run_optimizations(algo_id, config=config_dict, explicit_ids=explicit_optimizations)
     return TrainResult(
         algo_id=algo_id,
         seed=seed,

@@ -16,6 +16,7 @@ Original single-file modular implementation for wannado-drl.
 
 from __future__ import annotations
 
+import math
 import time
 from dataclasses import asdict, dataclass
 from typing import Any
@@ -31,7 +32,7 @@ from wannado.drl.core.algo_helpers import (
     setup_offline_run,
 )
 from wannado.drl.core.networks import QNetwork, SquashedGaussianActor, TwinQCritic
-from wannado.drl.core.obs_spec import concat_obs_tensors, obs_to_tensor, slice_obs
+from wannado.drl.core.obs_spec import obs_to_tensor, slice_obs
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import hard_update, polyak_update, resolve_device, set_global_seed
 from wannado.drl.core.wrappers import OfflineTransitionDataset
@@ -265,6 +266,8 @@ def train_cql(
             obs_spec,
             dataset.action_dim,
             cfg.hidden_dims,
+            action_low=act_low,
+            action_high=act_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -272,6 +275,8 @@ def train_cql(
             obs_spec,
             dataset.action_dim,
             cfg.hidden_dims,
+            action_low=act_low,
+            action_high=act_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -317,15 +322,25 @@ def train_cql(
             td_loss = F.mse_loss(q1, td_target) + F.mse_loss(q2, td_target)
 
             rep_obs = _repeat_batch_obs(b_obs, cfg.num_random_actions)
-            rand_a = low_t + torch.rand(cfg.batch_size * cfg.num_random_actions, dataset.action_dim, device=dev) * (high_t - low_t)
-            pol_a, _ = actor.get_action(rep_obs)
-            cand_obs = concat_obs_tensors(rep_obs, rep_obs)
-            cand_a = torch.cat([rand_a, pol_a.detach()], dim=0)
-            cq1, cq2 = critic(cand_obs, cand_a)
-            cq1 = cq1.view(cfg.batch_size, 2 * cfg.num_random_actions)
-            cq2 = cq2.view(cfg.batch_size, 2 * cfg.num_random_actions)
-            cql_pen = (torch.logsumexp(cq1, dim=1) - q1.squeeze(-1)).mean() + (
-                torch.logsumexp(cq2, dim=1) - q2.squeeze(-1)
+            n_cand = cfg.batch_size * cfg.num_random_actions
+            rand_a = low_t + torch.rand(n_cand, dataset.action_dim, device=dev) * (high_t - low_t)
+            with torch.no_grad():
+                pol_a, pol_lp = actor.get_action(rep_obs)
+            # Evaluate random & policy candidates separately so (B, K) rows stay strictly aligned per state
+            # and apply Kumar et al. (2020, Appendix F) importance-sampling density correction.
+            cq1_r, cq2_r = critic(rep_obs, rand_a)
+            cq1_p, cq2_p = critic(rep_obs, pol_a)
+            cq1_r = cq1_r.view(cfg.batch_size, cfg.num_random_actions)
+            cq2_r = cq2_r.view(cfg.batch_size, cfg.num_random_actions)
+            cq1_p = cq1_p.view(cfg.batch_size, cfg.num_random_actions)
+            cq2_p = cq2_p.view(cfg.batch_size, cfg.num_random_actions)
+            pol_lp_mat = pol_lp.view(cfg.batch_size, cfg.num_random_actions)
+            log_unif = -float(np.sum(np.log(np.maximum(act_high - act_low, 1e-6))))
+            cat_q1 = torch.cat([cq1_r - log_unif, cq1_p - pol_lp_mat], dim=1)
+            cat_q2 = torch.cat([cq2_r - log_unif, cq2_p - pol_lp_mat], dim=1)
+            log_2k = math.log(2.0 * cfg.num_random_actions)
+            cql_pen = (torch.logsumexp(cat_q1, dim=1) - log_2k - q1.squeeze(-1)).mean() + (
+                torch.logsumexp(cat_q2, dim=1) - log_2k - q2.squeeze(-1)
             ).mean()
 
             critic_loss = td_loss + 0.5 * cfg.cql_alpha * cql_pen
@@ -390,4 +405,5 @@ def train_cql(
         eval_episodes=cfg.eval_episodes,
         seed=cfg.seed,
         rng=rng,
+        explicit_optimizations=[] if dataset.is_discrete else ["clipped_double_q"],
     )

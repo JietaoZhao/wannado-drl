@@ -190,7 +190,7 @@ def train_trpo(
         env.obs_spec,
         act_shape,
         action_dtype=act_dtype,
-        mask_dim=env.action_dim if env.is_discrete else None,
+        mask_dim=env.action_dim if (env.is_discrete or env.action_nvec is not None) else None,
         num_envs=env.num_envs,
         batched=True,
     )
@@ -207,7 +207,7 @@ def train_trpo(
     kl_hist, ent_hist, ev_hist = [], [], []
 
     def _get_dist(b_o: Any, b_m: torch.Tensor | None) -> Any:
-        if env.is_discrete:
+        if env.is_discrete or env.action_nvec is not None:
             return net.get_dist(b_o, action_mask=b_m)
         return net.get_dist(b_o)
 
@@ -228,7 +228,7 @@ def train_trpo(
                 saw_action_mask = True
             mask_t = torch.as_tensor(mask_batch, device=dev, dtype=torch.bool) if mask_batch is not None else None
             with torch.no_grad():
-                if env.is_discrete:
+                if env.is_discrete or env.action_nvec is not None:
                     act_t, lp_t, _, val_t = net.get_action_and_value(obs_t, action_mask=mask_t)
                 else:
                     act_t, lp_t, _, val_t = net.get_action_and_value(obs_t)
@@ -254,7 +254,11 @@ def train_trpo(
                 val_t.cpu().numpy(),
                 action_masks=mask_batch
                 if mask_batch is not None
-                else (np.ones((env.num_envs, env.action_dim), dtype=np.bool_) if env.is_discrete else None),
+                else (
+                    np.ones((env.num_envs, env.action_dim), dtype=np.bool_)
+                    if (env.is_discrete or env.action_nvec is not None)
+                    else None
+                ),
                 dones=sb.dones,
                 valid_mask=sb.valid_transition,
             )
@@ -303,6 +307,10 @@ def train_trpo(
         grads = torch.autograd.grad(loss_old, actor_params)
         loss_grad = torch.cat([g.reshape(-1) for g in grads]).detach()
 
+        def _batch_kl(d1: Any, d2: Any) -> torch.Tensor:
+            kl = kl_divergence(d1, d2)
+            return (kl.sum(dim=-1) if kl.ndim > 1 else kl).mean()
+
         def _fvp(
             v: torch.Tensor,
             obs_b: Any = b_obs,
@@ -310,7 +318,7 @@ def train_trpo(
             ref_dist: Any = old_dist,
         ) -> torch.Tensor:
             dist = _get_dist(obs_b, mask_b)
-            kl = kl_divergence(ref_dist, dist).mean()
+            kl = _batch_kl(ref_dist, dist)
             kl_grads = torch.autograd.grad(kl, actor_params, create_graph=True)
             flat_kl_grad = torch.cat([g.reshape(-1) for g in kl_grads])
             kl_v = torch.dot(flat_kl_grad, v)
@@ -330,7 +338,7 @@ def train_trpo(
                 with torch.no_grad():
                     new_loss = _surrogate()
                     new_dist = _get_dist(b_obs, b_mask)
-                    kl_val = float(kl_divergence(old_dist, new_dist).mean().item())
+                    kl_val = float(_batch_kl(old_dist, new_dist).item())
                 if new_loss > loss_old and kl_val <= cfg.max_kl * 1.5:
                     accepted_kl = kl_val
                     break

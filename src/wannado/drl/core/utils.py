@@ -20,7 +20,7 @@ def set_global_seed(seed: int, deterministic_torch: bool = False) -> np.random.G
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
     if deterministic_torch:
-        torch.use_deterministic_algorithms(False)
+        torch.use_deterministic_algorithms(True, warn_only=True)
     return np.random.default_rng(seed)
 
 

@@ -152,8 +152,10 @@ class ExternalPolicyWrapper:
             hook()
 
     def _prepare_obs(self, obs: Any) -> Any:
-        if isinstance(self.raw_policy, PolicyBundle) and isinstance(obs, dict):
-            return obs
+        if isinstance(obs, dict):
+            if isinstance(self.raw_policy, PolicyBundle):
+                return obs
+            return {k: np.asarray(v, dtype=np.float32) for k, v in obs.items()}
         arr = np.asarray(obs, dtype=np.float32)
         env_already_normed = hasattr(self.env_adapter.raw_env, "obs_rms")
         if self._obs_rms is not None and not env_already_normed:
@@ -202,10 +204,17 @@ class ExternalPolicyWrapper:
 
         if isinstance(self.raw_policy, torch.nn.Module):
             with torch.no_grad():
-                x = torch.as_tensor(obs_in, dtype=torch.float32, device=self.device)
-                if x.ndim == 1 or (x.ndim == 3 and x.shape[-1] in (1, 3, 4)):
-                    x = x.unsqueeze(0)
-                out = self.raw_policy(x)
+                if isinstance(obs_in, dict):
+                    x_in: Any = {}
+                    for k, v in obs_in.items():
+                        vt = torch.as_tensor(v, dtype=torch.float32, device=self.device)
+                        x_in[k] = vt.unsqueeze(0) if vt.ndim in (1, 3) else vt
+                else:
+                    x_t = torch.as_tensor(obs_in, dtype=torch.float32, device=self.device)
+                    if x_t.ndim in (1, 3):
+                        x_t = x_t.unsqueeze(0)
+                    x_in = x_t
+                out = self.raw_policy(x_in)
                 if isinstance(out, tuple):
                     out = out[0]
                 if isinstance(out, torch.distributions.Distribution):
@@ -223,6 +232,30 @@ class ExternalPolicyWrapper:
         return self._format_action(raw)
 
 
+def _snapshot_obs_rms(rms: Any) -> tuple[np.ndarray, np.ndarray, float] | None:
+    if rms is None:
+        return None
+    mean = getattr(rms, "mean", None)
+    var = getattr(rms, "var", None)
+    if mean is None or var is None:
+        return None
+    count = float(getattr(rms, "count", 0.0))
+    return (np.asarray(mean, dtype=np.float64).copy(), np.asarray(var, dtype=np.float64).copy(), count)
+
+
+def _obs_rms_changed(before: tuple[np.ndarray, np.ndarray, float] | None, rms: Any) -> bool:
+    if before is None or rms is None:
+        return False
+    after = _snapshot_obs_rms(rms)
+    if after is None:
+        return False
+    return (
+        not np.allclose(before[0], after[0], rtol=0.0, atol=1e-12)
+        or not np.allclose(before[1], after[1], rtol=0.0, atol=1e-12)
+        or abs(before[2] - after[2]) > 1e-12
+    )
+
+
 def wrap_external_policy(
     policy_or_path: Any,
     env_or_factory: Any,
@@ -236,8 +269,15 @@ def wrap_external_policy(
     """Wrap an external policy (SB3, nn.Module, PolicyBundle, checkpoint path, or callable) for evaluation."""
     resolved = _load_external_artifact(policy_or_path, sb3_algo=sb3_algo)
     policy_spec = getattr(resolved, "obs_spec", None)
-    needs_structured = bool(policy_spec is not None and getattr(policy_spec, "kind", "vector") != "vector")
-    adapter = ensure_gym_env(env_or_factory, structured_obs=needs_structured)
+    if policy_spec is not None:
+        needs_structured = bool(getattr(policy_spec, "kind", "vector") != "vector")
+        adapter = ensure_gym_env(env_or_factory, structured_obs=needs_structured)
+    else:
+        adapter = ensure_gym_env(env_or_factory, structured_obs=True)
+        if getattr(adapter.obs_spec, "flatten_dict_leaves", False):
+            adapter = ensure_gym_env(adapter.raw_env, structured_obs=True, extractor_type="dict")
+        elif adapter.obs_spec.kind not in ("image", "dict"):
+            adapter.structured_obs = False
     return ExternalPolicyWrapper(
         resolved,
         adapter,
@@ -296,12 +336,19 @@ def evaluate_external_policy(
         if wrapper.obs_spec is not None:
             _recording_policy.obs_spec = wrapper.obs_spec  # type: ignore[attr-defined]
 
+        # Actively verify obs_rms invariance during deterministic evaluation (catches mutable custom wrappers)
+        env_rms = getattr(wrapper.env_adapter.raw_env, "obs_rms", None)
+        snap_wrapper_rms = _snapshot_obs_rms(wrapper._obs_rms)
+        snap_env_rms = _snapshot_obs_rms(env_rms)
+
         eval_stats: EpisodeEvalStats = evaluate_policy_episodes(
             wrapper.env_adapter,
             _recording_policy,
             num_episodes=max(1, int(eval_episodes)),
             seed=eval_seed + idx * 100,
         )
+        if _obs_rms_changed(snap_wrapper_rms, wrapper._obs_rms) or _obs_rms_changed(snap_env_rms, env_rms):
+            wrapper.obs_rms_frozen_on_eval = False
         sat_rate = (
             compute_action_saturation_rate(
                 np.vstack(recorded_actions),
@@ -314,6 +361,13 @@ def evaluate_external_policy(
         num_timesteps = int(getattr(wrapper.raw_policy, "num_timesteps", 0) or 0)
         elapsed = time.perf_counter() - t0
         is_cont = not wrapper.env_adapter.is_discrete and wrapper.env_adapter.action_nvec is None
+        train_diag: dict[str, Any] = {
+            "is_continuous": float(is_cont),
+            "action_saturation_rate": round(float(sat_rate), 4),
+            "external_backend": wrapper.backend,
+        }
+        if eval_stats.mean_cost is not None:
+            train_diag["mean_episode_cost"] = round(float(eval_stats.mean_cost), 4)
         results.append(
             TrainResult(
                 algo_id=algo_id,
@@ -328,11 +382,7 @@ def evaluate_external_policy(
                     "eval_episodes": eval_episodes,
                 },
                 learning_curve=[{"step": float(num_timesteps), "episode_return": float(eval_stats.mean_return)}],
-                train_diagnostics={
-                    "is_continuous": float(is_cont),
-                    "action_saturation_rate": round(float(sat_rate), 4),
-                    "external_backend": wrapper.backend,
-                },
+                train_diagnostics=train_diag,
                 eval_stats=eval_stats,
                 obs_rms_frozen_on_eval=wrapper.obs_rms_frozen_on_eval,
                 optimizations_used=(["obs_normalization"] if wrapper._obs_rms is not None else []),

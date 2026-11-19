@@ -154,6 +154,8 @@ def train_td3(
             env.obs_spec,
             env.action_dim,
             cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)
@@ -161,6 +163,8 @@ def train_td3(
             env.obs_spec,
             env.action_dim,
             cfg.hidden_dims,
+            action_low=env.action_low,
+            action_high=env.action_high,
             extractor_type=cfg.extractor_type,
             extractor_kwargs=cfg.extractor_kwargs,
         ).to(dev)

@@ -175,7 +175,7 @@ def train_ppo_gru(
         env.obs_spec,
         act_shape,
         action_dtype=act_dtype,
-        mask_dim=env.action_dim if env.is_discrete else None,
+        mask_dim=env.action_dim if (env.is_discrete or env.action_nvec is not None) else None,
         num_envs=env.num_envs,
         batched=True,
     )
@@ -237,7 +237,11 @@ def train_ppo_gru(
                 val_t.cpu().numpy(),
                 action_masks=mask_batch
                 if mask_batch is not None
-                else (np.ones((env.num_envs, env.action_dim), dtype=np.bool_) if env.is_discrete else None),
+                else (
+                    np.ones((env.num_envs, env.action_dim), dtype=np.bool_)
+                    if (env.is_discrete or env.action_nvec is not None)
+                    else None
+                ),
                 dones=sb.dones,
                 valid_mask=sb.valid_transition,
             )
@@ -302,6 +306,8 @@ def train_ppo_gru(
                 entropy = dist.entropy()
             elif net.action_nvec is not None:
                 logits = net.actor(feats)
+                if b_mask is not None and b_mask.shape[-1] == logits.shape[-1]:
+                    logits = logits.masked_fill(~b_mask, -1e8)
                 dist = MultiCategorical(torch.split(logits, list(net.action_nvec), dim=-1))
                 new_lp = dist.log_prob(b_act)
                 entropy = dist.entropy()

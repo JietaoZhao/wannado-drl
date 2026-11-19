@@ -280,11 +280,14 @@ class ReplayBuffer:
         device: torch.device | str = "cpu",
         *,
         track_costs: bool = False,
+        track_next_masks: bool = False,
     ) -> None:
         self.capacity = int(capacity)
+        self.action_dim = int(action_dim)
         self.device = torch.device(device)
         self.discrete_action = discrete_action
         self.track_costs = bool(track_costs)
+        self.track_next_masks = bool(track_next_masks and discrete_action)
         self.obs_spec = _resolve_spec(obs_dim)
         self.obs: Any = _alloc_obs_storage((self.capacity,), self.obs_spec)
         self.next_obs: Any = _alloc_obs_storage((self.capacity,), self.obs_spec)
@@ -294,6 +297,9 @@ class ReplayBuffer:
         self.rewards = np.zeros((self.capacity,), dtype=np.float32)
         self.terminateds = np.zeros((self.capacity,), dtype=np.float32)
         self.costs = np.zeros((self.capacity,), dtype=np.float32) if self.track_costs else None
+        self.next_action_masks = (
+            np.ones((self.capacity, self.action_dim), dtype=np.bool_) if self.track_next_masks else None
+        )
         self.ptr = 0
         self.size = 0
 
@@ -305,6 +311,7 @@ class ReplayBuffer:
         next_obs: Any,
         terminated: bool,
         cost: float = 0.0,
+        next_action_mask: np.ndarray | None = None,
     ) -> None:
         _write_obs_slot(self.obs, self.ptr, obs, self.obs_spec)
         _write_obs_slot(self.next_obs, self.ptr, next_obs, self.obs_spec)
@@ -313,6 +320,11 @@ class ReplayBuffer:
         self.terminateds[self.ptr] = float(terminated)
         if self.costs is not None:
             self.costs[self.ptr] = float(cost)
+        if self.next_action_masks is not None:
+            if next_action_mask is not None:
+                self.next_action_masks[self.ptr] = np.asarray(next_action_mask, dtype=np.bool_).reshape(self.action_dim)
+            else:
+                self.next_action_masks[self.ptr] = True
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
@@ -325,12 +337,18 @@ class ReplayBuffer:
         terminateds: np.ndarray,
         valid_mask: np.ndarray | None = None,
         costs: np.ndarray | None = None,
+        next_action_masks: np.ndarray | None = None,
     ) -> int:
         """Append a batch of vectorized transitions (skipping invalid autoreset dummy steps)."""
         rew_arr = np.asarray(rewards, dtype=np.float32).reshape(-1)
         term_arr = np.asarray(terminateds, dtype=np.float32).reshape(-1)
         act_arr = np.asarray(actions)
         cost_arr = np.asarray(costs, dtype=np.float32).reshape(-1) if costs is not None else None
+        nmask_arr = (
+            np.asarray(next_action_masks, dtype=np.bool_).reshape(-1, self.action_dim)
+            if next_action_masks is not None and self.next_action_masks is not None
+            else None
+        )
         if valid_mask is not None:
             vmask = np.asarray(valid_mask, dtype=np.bool_).reshape(-1)
             if not np.any(vmask):
@@ -342,6 +360,8 @@ class ReplayBuffer:
             term_arr = term_arr[vmask]
             if cost_arr is not None:
                 cost_arr = cost_arr[vmask]
+            if nmask_arr is not None:
+                nmask_arr = nmask_arr[vmask]
 
         n = int(rew_arr.shape[0])
         if n == 0:
@@ -355,6 +375,8 @@ class ReplayBuffer:
             self.terminateds[:] = term_arr[keep]
             if self.costs is not None and cost_arr is not None:
                 self.costs[:] = cost_arr[keep]
+            if self.next_action_masks is not None:
+                self.next_action_masks[:] = nmask_arr[keep] if nmask_arr is not None else True
             self.ptr = 0
             self.size = self.capacity
             return n
@@ -369,6 +391,8 @@ class ReplayBuffer:
             self.terminateds[sl] = term_arr
             if self.costs is not None and cost_arr is not None:
                 self.costs[sl] = cost_arr
+            if self.next_action_masks is not None:
+                self.next_action_masks[sl] = nmask_arr if nmask_arr is not None else True
         else:
             first = self.capacity - self.ptr
             rem = n - first
@@ -387,6 +411,13 @@ class ReplayBuffer:
             if self.costs is not None and cost_arr is not None:
                 self.costs[sl1] = cost_arr[:first]
                 self.costs[sl2] = cost_arr[first:]
+            if self.next_action_masks is not None:
+                if nmask_arr is not None:
+                    self.next_action_masks[sl1] = nmask_arr[:first]
+                    self.next_action_masks[sl2] = nmask_arr[first:]
+                else:
+                    self.next_action_masks[sl1] = True
+                    self.next_action_masks[sl2] = True
         self.ptr = end % self.capacity
         self.size = min(self.size + n, self.capacity)
         return n
@@ -400,14 +431,22 @@ class ReplayBuffer:
             else np.random.randint(0, self.size, size=batch_size)
         )
 
+    def _obs_batch_tensor(self, storage: Any, idx: np.ndarray, obs_rms: Any | None = None) -> Any:
+        raw_slice = slice_obs(storage, idx)
+        if obs_rms is not None:
+            raw_slice = obs_rms.normalize(raw_slice)
+        return obs_to_tensor(raw_slice, self.obs_spec, self.device, add_batch_dim=False)
+
     def sample(
         self,
         batch_size: int,
         rng: np.random.Generator | None = None,
+        *,
+        obs_rms: Any | None = None,
     ) -> tuple[Any, torch.Tensor, torch.Tensor, Any, torch.Tensor]:
         idx = self._sample_indices(batch_size, rng)
-        b_obs = obs_to_tensor(slice_obs(self.obs, idx), self.obs_spec, self.device, add_batch_dim=False)
-        b_next = obs_to_tensor(slice_obs(self.next_obs, idx), self.obs_spec, self.device, add_batch_dim=False)
+        b_obs = self._obs_batch_tensor(self.obs, idx, obs_rms=obs_rms)
+        b_next = self._obs_batch_tensor(self.next_obs, idx, obs_rms=obs_rms)
         return (
             b_obs,
             torch.as_tensor(
@@ -420,15 +459,46 @@ class ReplayBuffer:
             torch.as_tensor(self.terminateds[idx], device=self.device, dtype=torch.float32),
         )
 
+    def sample_with_next_masks(
+        self,
+        batch_size: int,
+        rng: np.random.Generator | None = None,
+        *,
+        obs_rms: Any | None = None,
+    ) -> tuple[Any, torch.Tensor, torch.Tensor, Any, torch.Tensor, torch.Tensor | None]:
+        """Sample transition batch alongside discrete next-state action masks for masked Bellman targets."""
+        idx = self._sample_indices(batch_size, rng)
+        b_obs = self._obs_batch_tensor(self.obs, idx, obs_rms=obs_rms)
+        b_next = self._obs_batch_tensor(self.next_obs, idx, obs_rms=obs_rms)
+        b_nmask = (
+            torch.as_tensor(self.next_action_masks[idx], device=self.device, dtype=torch.bool)
+            if self.next_action_masks is not None
+            else None
+        )
+        return (
+            b_obs,
+            torch.as_tensor(
+                self.actions[idx],
+                device=self.device,
+                dtype=torch.long if self.discrete_action else torch.float32,
+            ),
+            torch.as_tensor(self.rewards[idx], device=self.device, dtype=torch.float32),
+            b_next,
+            torch.as_tensor(self.terminateds[idx], device=self.device, dtype=torch.float32),
+            b_nmask,
+        )
+
     def sample_with_costs(
         self,
         batch_size: int,
         rng: np.random.Generator | None = None,
+        *,
+        obs_rms: Any | None = None,
     ) -> tuple[Any, torch.Tensor, torch.Tensor, Any, torch.Tensor, torch.Tensor]:
         """Sample transition batch alongside constraint costs."""
         idx = self._sample_indices(batch_size, rng)
-        b_obs = obs_to_tensor(slice_obs(self.obs, idx), self.obs_spec, self.device, add_batch_dim=False)
-        b_next = obs_to_tensor(slice_obs(self.next_obs, idx), self.obs_spec, self.device, add_batch_dim=False)
+        b_obs = self._obs_batch_tensor(self.obs, idx, obs_rms=obs_rms)
+        b_next = self._obs_batch_tensor(self.next_obs, idx, obs_rms=obs_rms)
         c_arr = self.costs[idx] if self.costs is not None else np.zeros((len(idx),), dtype=np.float32)
         return (
             b_obs,
@@ -457,6 +527,8 @@ class ReplayBuffer:
         }
         if self.costs is not None:
             out["costs"] = self.costs[: self.size]
+        if self.next_action_masks is not None:
+            out["next_action_masks"] = self.next_action_masks[: self.size]
         return out
 
     def load_state_dict(self, state: dict[str, Any]) -> None:
@@ -473,6 +545,8 @@ class ReplayBuffer:
         self.terminateds[:sz] = state["terminateds"][:sz]
         if self.costs is not None and "costs" in state:
             self.costs[:sz] = state["costs"][:sz]
+        if self.next_action_masks is not None and "next_action_masks" in state:
+            self.next_action_masks[:sz] = state["next_action_masks"][:sz]
         self.size = sz
         self.ptr = int(state["ptr"]) % self.capacity
 
@@ -539,19 +613,21 @@ class DualDemoReplayBuffer:
         batch_size: int,
         demo_fraction: float = 0.5,
         rng: np.random.Generator | None = None,
+        *,
+        obs_rms: Any | None = None,
     ) -> tuple[Any, torch.Tensor, torch.Tensor, Any, torch.Tensor]:
         """Mix offline demo/human-intervention transitions with online rollout transitions."""
         if self.demo_buffer.size == 0 and self.online_buffer.size == 0:
             raise RuntimeError("Both demo and online buffers are empty.")
         if self.demo_buffer.size == 0:
-            return self.online_buffer.sample(batch_size, rng=rng)
+            return self.online_buffer.sample(batch_size, rng=rng, obs_rms=obs_rms)
         if self.online_buffer.size == 0:
-            return self.demo_buffer.sample(batch_size, rng=rng)
+            return self.demo_buffer.sample(batch_size, rng=rng, obs_rms=obs_rms)
 
         n_demo = max(1, min(batch_size - 1, round(batch_size * demo_fraction)))
         n_online = batch_size - n_demo
-        d_batch = self.demo_buffer.sample(n_demo, rng=rng)
-        o_batch = self.online_buffer.sample(n_online, rng=rng)
+        d_batch = self.demo_buffer.sample(n_demo, rng=rng, obs_rms=obs_rms)
+        o_batch = self.online_buffer.sample(n_online, rng=rng, obs_rms=obs_rms)
         return (
             concat_obs_tensors(d_batch[0], o_batch[0]),
             torch.cat([d_batch[1], o_batch[1]], dim=0),
@@ -559,3 +635,15 @@ class DualDemoReplayBuffer:
             concat_obs_tensors(d_batch[3], o_batch[3]),
             torch.cat([d_batch[4], o_batch[4]], dim=0),
         )
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "demo_buffer": self.demo_buffer.state_dict(),
+            "online_buffer": self.online_buffer.state_dict(),
+        }
+
+    def load_state_dict(self, state: dict[str, Any]) -> None:
+        if "demo_buffer" in state:
+            self.demo_buffer.load_state_dict(state["demo_buffer"])
+        if "online_buffer" in state:
+            self.online_buffer.load_state_dict(state["online_buffer"])

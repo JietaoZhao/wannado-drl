@@ -147,8 +147,9 @@ def train_arpo(
     rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
 
+    max_seq_len = max(128, int(task.prompt_len) + int(task.max_response_len) + 8)
     model = policy if policy is not None else AutoregressiveSeqPolicy(
-        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim
+        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim, max_seq_len=max_seq_len
     ).to(dev)
     ref_model = copy.deepcopy(model).to(dev)
     ref_model.eval()
@@ -222,22 +223,25 @@ def train_arpo(
             dtype=torch.float32,
         )
 
+        valid_mask = AutoregressiveSeqPolicy.eos_valid_mask(all_resps, task.eos_token_id)
+        mask_denom = valid_mask.sum().clamp(min=1.0)
+
         with torch.no_grad():
-            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(all_prompts, all_resps)
+            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(all_prompts, all_resps, temperature=cfg.temperature)
 
         for _ in range(cfg.update_epochs):
-            new_lps, entropy = model.sequence_logprobs_and_entropy(all_prompts, all_resps)
+            new_lps, entropy = model.sequence_logprobs_and_entropy(all_prompts, all_resps, temperature=cfg.temperature)
             ratio = torch.exp(new_lps - all_old_lps)
             pg_obj = torch.min(ratio * all_adv, torch.clamp(ratio, 1.0 - cfg.clip_coef, 1.0 + cfg.clip_coef) * all_adv)
             log_ref = ref_lps - new_lps
             kl_k3 = torch.exp(log_ref) - log_ref - 1.0
-            loss = -(pg_obj - cfg.kl_coef * kl_k3).mean()
+            loss = -((pg_obj - cfg.kl_coef * kl_k3) * valid_mask).sum() / mask_denom
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
-            ent_hist.append(float(entropy.mean().item()))
+            ent_hist.append(float(((entropy * valid_mask).sum() / mask_denom).item()))
 
         if step % max(1, cfg.total_updates // 10) == 0 or step == cfg.total_updates:
             learning_curve.append({"step": float(step), "episode_return": float(np.mean(rews_np))})

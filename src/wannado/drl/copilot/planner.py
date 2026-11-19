@@ -35,7 +35,7 @@ _FRONTIER_SOTA = {"ppo_gru", "hil_serl", "mappo", "maddpg", "dapo", "gspo", "arp
 
 def _get_package_version() -> str:
     pkg = sys.modules.get("wannado.drl")
-    return str(getattr(pkg, "__version__", "1.1.0"))
+    return str(getattr(pkg, "__version__", "1.1.1"))
 
 
 @dataclass

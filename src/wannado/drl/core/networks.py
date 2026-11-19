@@ -322,17 +322,17 @@ def build_feature_extractor(
     if etype == "flatten" or (etype == "auto" and obs_spec.kind == "vector"):
         ident = IdentityFlattenExtractor(obs_spec)
         return ident, ident.output_dim
-    if obs_spec.kind == "image" or etype in ("nature_cnn", "impala_cnn", "small_cnn", "cnn"):
+    if obs_spec.kind == "image" or etype in ("nature_cnn", "impala_cnn", "impala", "small_cnn", "cnn"):
         leaf = next(iter(obs_spec.leaves.values()))
         shape_3d = leaf.shape if len(leaf.shape) == 3 else (1, int(leaf.shape[0]), int(leaf.shape[1]))
         chw = (int(shape_3d[0]), int(shape_3d[1]), int(shape_3d[2]))
         fdim = int(kw.pop("features_dim", 256))
-        if etype == "impala_cnn":
+        if etype in ("impala_cnn", "impala"):
             mod_cnn: nn.Module = ImpalaResNetExtractor(chw, features_dim=fdim, **kw)
         else:
             mod_cnn = NatureCNNExtractor(chw, features_dim=fdim)
         return mod_cnn, fdim
-    if obs_spec.kind == "entities" or etype == "attention":
+    if obs_spec.kind == "entities" or etype in ("attention", "set_attention"):
         leaf = next(iter(obs_spec.leaves.values()))
         in_f = int(leaf.shape[-1])
         fdim = int(kw.pop("features_dim", 64))
@@ -917,7 +917,10 @@ class SquashedGaussianActor(nn.Module):
 
 
 class SingleQCritic(nn.Module):
-    """Single continuous Q-Critic Q(s, a) with optional multimodal encoder (for DDPG)."""
+    """Single continuous Q-Critic Q(s, a) with optional action-bound normalization and multimodal encoder (for DDPG)."""
+
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
 
     def __init__(
         self,
@@ -925,6 +928,8 @@ class SingleQCritic(nn.Module):
         action_dim: int,
         hidden_dims: Sequence[int] = (128, 128),
         *,
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
         extractor_type: str = "auto",
         extractor_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -934,14 +939,26 @@ class SingleQCritic(nn.Module):
             spec, extractor_type=extractor_type, extractor_kwargs=extractor_kwargs
         )
         self.q = build_mlp(feat_dim + action_dim, hidden_dims, 1, activation=nn.ReLU)
+        scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
+        self.register_buffer("action_scale", scale_t)
+        self.register_buffer("action_bias", bias_t)
+        self._normalize_action = bool(action_low is not None and action_high is not None)
+
+    def _norm_action(self, action: torch.Tensor) -> torch.Tensor:
+        if not self._normalize_action:
+            return action
+        return (action - self.action_bias) / self.action_scale.clamp(min=1e-6)
 
     def forward(self, obs: Any, action: torch.Tensor) -> torch.Tensor:
         feat = self.features_extractor(obs)
-        return self.q(torch.cat([feat, action], dim=-1))
+        return self.q(torch.cat([feat, self._norm_action(action)], dim=-1))
 
 
 class TwinQCritic(nn.Module):
-    """Clipped Double Q-Critic with optional LayerNorm and multimodal encoder."""
+    """Clipped Double Q-Critic with optional action-bound normalization, LayerNorm, and multimodal encoder."""
+
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
 
     def __init__(
         self,
@@ -950,6 +967,8 @@ class TwinQCritic(nn.Module):
         hidden_dims: Sequence[int] = (128, 128),
         use_layer_norm: bool = False,
         *,
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
         extractor_type: str = "auto",
         extractor_kwargs: dict[str, Any] | None = None,
     ) -> None:
@@ -960,15 +979,24 @@ class TwinQCritic(nn.Module):
         )
         self.q1 = build_mlp(feat_dim + action_dim, hidden_dims, 1, activation=nn.ReLU, layer_norm=use_layer_norm)
         self.q2 = build_mlp(feat_dim + action_dim, hidden_dims, 1, activation=nn.ReLU, layer_norm=use_layer_norm)
+        scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
+        self.register_buffer("action_scale", scale_t)
+        self.register_buffer("action_bias", bias_t)
+        self._normalize_action = bool(action_low is not None and action_high is not None)
+
+    def _norm_action(self, action: torch.Tensor) -> torch.Tensor:
+        if not self._normalize_action:
+            return action
+        return (action - self.action_bias) / self.action_scale.clamp(min=1e-6)
 
     def forward(self, obs: Any, action: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         feat = self.features_extractor(obs)
-        sa = torch.cat([feat, action], dim=-1)
+        sa = torch.cat([feat, self._norm_action(action)], dim=-1)
         return self.q1(sa), self.q2(sa)
 
     def q1_forward(self, obs: Any, action: torch.Tensor) -> torch.Tensor:
         feat = self.features_extractor(obs)
-        return self.q1(torch.cat([feat, action], dim=-1))
+        return self.q1(torch.cat([feat, self._norm_action(action)], dim=-1))
 
 
 class QMixMixer(nn.Module):
@@ -1070,15 +1098,26 @@ class AutoregressiveSeqPolicy(nn.Module):
         self,
         prompts: torch.Tensor,
         responses: torch.Tensor,
+        *,
+        temperature: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Compute per-token log-probs and entropies for generated response positions."""
         full_seq = torch.cat([prompts, responses], dim=1)
         logits = self.forward_logits(full_seq[:, :-1])
-        resp_logits = logits[:, prompts.shape[1] - 1 :, :]
+        resp_logits = logits[:, prompts.shape[1] - 1 :, :] / max(float(temperature), 1e-4)
         dist = Categorical(logits=resp_logits)
         logprobs = dist.log_prob(responses)
         entropy = dist.entropy()
         return logprobs, entropy
+
+    @staticmethod
+    def eos_valid_mask(responses: torch.Tensor, eos_token_id: int | None) -> torch.Tensor:
+        """Cumulative token mask: 1.0 up to and including the first EOS token, 0.0 strictly after."""
+        if eos_token_id is None:
+            return torch.ones_like(responses, dtype=torch.float32)
+        is_eos = (responses == int(eos_token_id)).to(torch.int64)
+        prior_eos = torch.cumsum(is_eos, dim=1) - is_eos
+        return (prior_eos == 0).to(torch.float32)
 
 
 class ValueNetwork(nn.Module):

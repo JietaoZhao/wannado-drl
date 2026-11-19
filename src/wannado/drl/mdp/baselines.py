@@ -31,6 +31,8 @@ def evaluate_policy_episodes(
     comp_counts: dict[str, int] = {}
     kpi_sums: dict[str, float] = {}
     kpi_counts: dict[str, int] = {}
+    ep_costs: list[float] = []
+    saw_cost = False
 
     for ep in range(num_episodes):
         obs, info = env.reset(seed=seed + ep)
@@ -41,6 +43,7 @@ def evaluate_policy_episodes(
 
         ep_ret = 0.0
         ep_len = 0
+        ep_cost = 0.0
         done = False
         last_info: dict[str, Any] = dict(info)
         while not done:
@@ -48,6 +51,9 @@ def evaluate_policy_episodes(
             obs, reward, terminated, truncated, last_info = env.step(action)
             ep_ret += float(reward)
             ep_len += 1
+            if "cost" in last_info and isinstance(last_info["cost"], (int, float, np.number)):
+                ep_cost += float(last_info["cost"])
+                saw_cost = True
 
             # Aggregate sub-reward terms from info["reward_terms"] if supplied by env_wrapper
             r_terms = last_info.get("reward_terms")
@@ -76,6 +82,7 @@ def evaluate_policy_episodes(
 
         returns.append(ep_ret)
         lengths.append(ep_len)
+        ep_costs.append(ep_cost)
 
     arr = np.asarray(returns, dtype=np.float64)
     return EpisodeEvalStats(
@@ -88,6 +95,7 @@ def evaluate_policy_episodes(
         task_metrics_mean={k: kpi_sums[k] / max(kpi_counts[k], 1) for k in kpi_sums},
         terminated_fraction=float(term_count / max(num_episodes, 1)),
         truncated_fraction=float(trunc_count / max(num_episodes, 1)),
+        mean_cost=float(np.mean(ep_costs)) if saw_cost and ep_costs else None,
     )
 
 

@@ -10,7 +10,7 @@ from typing import Any
 
 from wannado.drl.algos import ALGO_EXPORTS, lazy_resolve
 
-__version__ = "1.1.0"
+__version__ = "1.1.1"
 
 _LAZY_EXPORTS: dict[str, tuple[str, str]] = {
     **ALGO_EXPORTS,

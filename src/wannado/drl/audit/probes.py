@@ -286,13 +286,18 @@ def probe_transition_batch(
 
     # 5. Future-Leakage Probe B: Shifted-Column Lookahead Clone Detector
     # Detect s_t[:, j] == s_{t+1}[:, k] (j != k) while ruling out causal frame-stacking / lag buffers.
-    if n_steps >= 30 and obs_dim >= 2 and obs_dim <= 64:
+    if n_steps >= 30 and obs_dim >= 2:
         in_ep = ~done_arr
         s_curr = obs_arr[in_ep]
         s_nxt = next_obs_arr[in_ep]
         a_curr = _select_active_columns(act_arr[in_ep], max_cols=16)
         r_curr = rew_arr[in_ep]
         active_cols = [c for c in range(obs_dim) if c not in const_idx]
+        if len(active_cols) > 64:
+            # Select top-64 highest-variance active columns so high-dimensional envs are still probed cleanly
+            active_cols = sorted(
+                sorted(active_cols, key=lambda c: float(stds[c]), reverse=True)[:64]
+            )
 
         # Build reset disparity baseline if reset samples were provided
         reset_arr = np.asarray(reset_obs_samples, dtype=np.float64) if reset_obs_samples is not None else None
@@ -339,11 +344,12 @@ def probe_transition_batch(
                         )
 
             # 6. Probe C: Exogenous Future-Innovation Column inside obs_t
-            # Catches s_t = [state_t, future_return_{t+1}] where future_return_{t+1} is NOT copied to obs_{t+1},
-            # yet deterministically dictates (obs_{t+1}[k] - obs_t[k]) and drives action-interacted reward r_t.
+            # Catches s_t = [state_t, future_return_{t+1}] (linear or nonlinear sign/monotonic lookahead)
+            # where the innovation is NOT copied to obs_{t+1}, yet predicts (obs_{t+1}[k] - obs_t[k]) and r_t.
             if not shifted_pairs and rew_std > 1e-8 and s_curr.shape[0] >= 35:
-                sa_curr = np.hstack([s_curr, a_curr])
-                for j in active_cols:
+                s_curr_sub = s_curr[:, active_cols]
+                sa_curr = np.hstack([s_curr_sub, a_curr])
+                for pos_j, j in enumerate(active_cols):
                     # Exogenous innovations are unpredictable in t+1 from (s_t, a_t)
                     r2_next_j, _ = _kfold_cv_r2(sa_curr, s_nxt[:, j], n_folds=4, ridge_alpha=1e-1)
                     if r2_next_j > 0.30:
@@ -357,20 +363,27 @@ def probe_transition_batch(
                             continue
                         design_jk = np.column_stack([xj, s_curr[:, k], xj * s_curr[:, k]])
                         r2_delta_k, _ = _kfold_cv_r2(design_jk, delta_k, n_folds=4, ridge_alpha=1e-2)
-                        if r2_delta_k > 0.92:
+                        sign_delta = np.sign(delta_k)
+                        r2_sign_k = (
+                            _kfold_cv_r2(design_jk, sign_delta, n_folds=4, ridge_alpha=1e-2)[0]
+                            if float(np.std(sign_delta)) > 0.1
+                            else 0.0
+                        )
+                        r2_innov = max(r2_delta_k, r2_sign_k)
+                        if r2_innov > 0.92:
                             # Confirm feature j (or j * a_t) drives current reward r_t beyond chance
                             inter_full = np.hstack(
-                                [s_curr, a_curr, s_curr[:, j : j + 1] * a_curr if a_curr.shape[1] else s_curr[:, j : j + 1]]
+                                [s_curr_sub, a_curr, s_curr[:, j : j + 1] * a_curr if a_curr.shape[1] else s_curr[:, j : j + 1]]
                             )
-                            others = [c for c in range(obs_dim) if c != j]
+                            others_pos = [p for p in range(len(active_cols)) if p != pos_j]
                             inter_wo = (
-                                np.hstack([s_curr[:, others], a_curr]) if others else a_curr
+                                np.hstack([s_curr_sub[:, others_pos], a_curr]) if others_pos else a_curr
                             )
                             r2_r_full, _ = _kfold_cv_r2(inter_full, r_curr, n_folds=4, ridge_alpha=1e-1)
                             r2_r_wo, _ = _kfold_cv_r2(inter_wo, r_curr, n_folds=4, ridge_alpha=1e-1) if inter_wo.shape[1] else (0.0, np.zeros_like(r_curr))
                             if r2_r_full - r2_r_wo > 0.25:
                                 leakage_signals.append(
-                                    f"exogenous_future_innovation_in_obs(col={j} -> delta_col[{k}] R^2={r2_delta_k:.3f})"
+                                    f"exogenous_future_innovation_in_obs(col={j} -> delta_col[{k}] R^2={r2_innov:.3f})"
                                 )
                                 break
 

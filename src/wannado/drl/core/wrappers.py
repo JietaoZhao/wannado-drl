@@ -364,7 +364,7 @@ def _extract_vec_info(raw_info: Any, idx: int, num_envs: int) -> dict[str, Any]:
     out: dict[str, Any] = {}
     for k, v in raw_info.items():
         ks = str(k)
-        if ks.startswith("_") or ks in ("final_observation", "final_info"):
+        if ks.startswith("_") or ks in ("final_observation", "final_obs", "final_info"):
             continue
         present_flag = raw_info.get(f"_{ks}")
         if present_flag is not None and idx < len(present_flag) and not bool(present_flag[idx]):
@@ -374,6 +374,25 @@ def _extract_vec_info(raw_info: Any, idx: int, num_envs: int) -> dict[str, Any]:
         else:
             out[ks] = v
     return out
+
+
+def _extract_vec_final_info(raw_info: Any, idx: int, num_envs: int) -> dict[str, Any]:
+    """Extract terminal-step ``final_info`` for slot ``idx`` (Gymnasium <1.0 array-of-dicts and 1.0+ dict-of-arrays)."""
+    if not isinstance(raw_info, dict) or "final_info" not in raw_info:
+        return {}
+    flag = raw_info.get("_final_info")
+    if flag is not None and idx < len(flag) and not bool(flag[idx]):
+        return {}
+    fin = raw_info["final_info"]
+    if fin is None:
+        return {}
+    if isinstance(fin, dict):
+        return _extract_vec_info(fin, idx, num_envs)
+    if isinstance(fin, (np.ndarray, list, tuple)) and idx < len(fin):
+        item = fin[idx]
+        if isinstance(item, dict):
+            return dict(item)
+    return {}
 
 
 class UniversalGymAdapter(gym.Env):
@@ -640,7 +659,7 @@ class UniversalGymAdapter(gym.Env):
             raw_obs = _extract_vec_slot(raw_obs, 0)
 
         obs_out = self.format_obs(raw_obs)
-        if self.is_discrete:
+        if self.is_discrete or self.action_nvec is not None:
             mask = (
                 self._action_mask_fn(obs_out, info)
                 if self._action_mask_fn is not None
@@ -684,6 +703,10 @@ class UniversalGymAdapter(gym.Env):
                 terminated = bool(np.asarray(term).reshape(-1)[0])
                 truncated = bool(np.asarray(trunc).reshape(-1)[0])
                 info = _extract_vec_info(raw_info, 0, self.num_envs)
+                if terminated or truncated:
+                    fin0 = _extract_vec_final_info(raw_info, 0, self.num_envs)
+                    if fin0:
+                        info.update(fin0)
             else:
                 reward = float(rew)
                 terminated = bool(term)
@@ -715,7 +738,7 @@ class UniversalGymAdapter(gym.Env):
             truncated = True
 
         obs_out = self.format_obs(raw_obs)
-        if self.is_discrete:
+        if self.is_discrete or self.action_nvec is not None:
             mask = (
                 self._action_mask_fn(obs_out, info)
                 if self._action_mask_fn is not None
@@ -964,7 +987,7 @@ class VectorizedEnvAdapter:
         obs_batch = format_obs_batch(raw_obs, self.obs_spec, self.num_envs)
         masks = (
             _extract_batch_action_masks(raw_info, self.num_envs, self.action_dim, self._action_mask_fn, obs_batch)
-            if self.is_discrete
+            if (self.is_discrete or self.action_nvec is not None)
             else None
         )
         return obs_batch, masks
@@ -1077,10 +1100,17 @@ class VectorizedEnvAdapter:
 
         masks = (
             _extract_batch_action_masks(raw_info, self.num_envs, self.action_dim, self._action_mask_fn, obs_batch)
-            if self.is_discrete
+            if (self.is_discrete or self.action_nvec is not None)
             else None
         )
-        infos = [_extract_vec_info(raw_info, i, self.num_envs) for i in range(self.num_envs)]
+        infos: list[dict[str, Any]] = []
+        for i in range(self.num_envs):
+            info_i = _extract_vec_info(raw_info, i, self.num_envs)
+            if done_arr[i]:
+                fin_i = _extract_vec_final_info(raw_info, i, self.num_envs)
+                if fin_i:
+                    info_i.update(fin_i)
+            infos.append(info_i)
         return VectorStepBatch(
             obs=obs_batch,
             final_obs=final_obs_batch,

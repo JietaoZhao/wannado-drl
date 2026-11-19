@@ -179,23 +179,23 @@ def audit_drl_rigor(
         kpi_names = list(rand_base.task_metrics_mean.keys())
         if mdp_spec and mdp_spec.task_kpis:
             kpi_names = [k for k in mdp_spec.task_kpis if k in rand_base.task_metrics_mean] or kpi_names
-        if kpi_names:
-            k0 = kpi_names[0]
+        ret_improved = stats["mean"] > rand_base.mean_return + 1e-3
+        for k_name in kpi_names:
             eval_kpis = [
-                r.eval_stats.task_metrics_mean[k0]
+                r.eval_stats.task_metrics_mean[k_name]
                 for r in seed_results
-                if r.eval_stats is not None and k0 in r.eval_stats.task_metrics_mean
+                if r.eval_stats is not None and k_name in r.eval_stats.task_metrics_mean
             ]
             if eval_kpis:
                 mean_kpi = float(np.mean(eval_kpis))
-                base_kpi = float(rand_base.task_metrics_mean[k0])
-                ret_improved = stats["mean"] > rand_base.mean_return + 1e-3
+                base_kpi = float(rand_base.task_metrics_mean[k_name])
                 kpi_degraded = (mean_kpi < base_kpi - 1e-4) if primary_kpi_higher_is_better else (mean_kpi > base_kpi + 1e-4)
                 if ret_improved and kpi_degraded:
                     reward_hacking_ok = False
-                    red_flags.append("suspected_reward_hacking_kpi_divergence")
+                    if "suspected_reward_hacking_kpi_divergence" not in red_flags:
+                        red_flags.append("suspected_reward_hacking_kpi_divergence")
                     recommendations.append(
-                        f"Return improved ({rand_base.mean_return:.2f} -> {stats['mean']:.2f}) while primary KPI '{k0}' degraded ({base_kpi:.3f} -> {mean_kpi:.3f})!"
+                        f"Return improved ({rand_base.mean_return:.2f} -> {stats['mean']:.2f}) while KPI '{k_name}' degraded ({base_kpi:.3f} -> {mean_kpi:.3f})!"
                     )
 
     # Check shaping reward dominance or early termination exploit

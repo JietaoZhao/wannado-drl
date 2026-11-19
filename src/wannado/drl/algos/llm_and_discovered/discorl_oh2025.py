@@ -29,7 +29,7 @@ from torch import nn
 from torch.distributions import Categorical, Normal
 from torch.func import functional_call
 
-from wannado.drl.core.networks import build_mlp
+from wannado.drl.core.networks import _compute_affine_action_bounds, build_mlp
 from wannado.drl.core.provenance import resolve_run_optimizations
 from wannado.drl.core.types import AlgoCitation, AlgoMeta, TrainResult
 from wannado.drl.core.utils import eval_mode, resolve_device, set_global_seed
@@ -90,6 +90,9 @@ META = AlgoMeta(
 class DiscoAgentNet(nn.Module):
     """Inner DiscoRL agent outputting policy parameters + unconstrained latent predictions y(s)."""
 
+    action_scale: torch.Tensor
+    action_bias: torch.Tensor
+
     def __init__(
         self,
         obs_dim: int,
@@ -97,6 +100,8 @@ class DiscoAgentNet(nn.Module):
         latent_dim: int = 8,
         hidden_dims: tuple[int, ...] = (64, 64),
         is_discrete: bool = True,
+        action_low: np.ndarray | None = None,
+        action_high: np.ndarray | None = None,
     ) -> None:
         super().__init__()
         self.is_discrete = is_discrete
@@ -104,12 +109,28 @@ class DiscoAgentNet(nn.Module):
         last_h = hidden_dims[-1]
         self.policy_head = nn.Linear(last_h, action_dim)
         self.latent_y_head = nn.Linear(last_h, latent_dim)
+        scale_t, bias_t = _compute_affine_action_bounds(action_dim, action_low, action_high)
+        self.register_buffer("action_scale", scale_t)
+        self.register_buffer("action_bias", bias_t)
+        self._has_finite_bounds = bool(
+            not is_discrete
+            and action_low is not None
+            and action_high is not None
+            and np.all(np.isfinite(action_low))
+            and np.all(np.isfinite(action_high))
+        )
         if not is_discrete:
             self.logstd = nn.Parameter(torch.zeros(1, action_dim))
 
     def forward(self, obs: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         feat = torch.tanh(self.trunk(obs))
-        return self.policy_head(feat), self.latent_y_head(feat)
+        raw_pol = self.policy_head(feat)
+        if not self.is_discrete:
+            if self._has_finite_bounds:
+                raw_pol = self.action_bias + self.action_scale * torch.tanh(raw_pol)
+            else:
+                raw_pol = self.action_bias + self.action_scale * raw_pol
+        return raw_pol, self.latent_y_head(feat)
 
 
 class DiscoMetaUpdateNet(nn.Module):
@@ -133,15 +154,30 @@ class DiscoMetaUpdateNet(nn.Module):
         logps: torch.Tensor,
         y_curr: torch.Tensor,
         y_next: torch.Tensor,
+        *,
+        dones: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Unroll backward from T-1 -> 0 to produce (pi_adv_hat, y_target_hat)."""
+        """Unroll backward from T-1 -> 0 to produce (pi_adv_hat, y_target_hat) respecting episode boundaries."""
         feats = torch.cat(
             [rewards.unsqueeze(-1), nonterminals.unsqueeze(-1), logps.unsqueeze(-1), y_curr, y_next],
             dim=-1,
         ).unsqueeze(1)  # (T, 1, D)
-        rev_feats = torch.flip(feats, dims=[0])
-        rev_out, _ = self.gru(rev_feats)
-        out = torch.flip(rev_out, dims=[0]).squeeze(1)
+        boundary = dones if dones is not None else (1.0 - nonterminals)
+        if torch.any(boundary > 0.5):
+            # Step-wise backward GRU unroll resetting hidden state across every episode boundary (term or trunc)
+            t_len = feats.shape[0]
+            h = torch.zeros(1, 1, self.gru.hidden_size, device=feats.device, dtype=feats.dtype)
+            rev_outs: list[torch.Tensor] = []
+            for t in range(t_len - 1, -1, -1):
+                if t < t_len - 1:
+                    h = h * (1.0 - boundary[t]).view(1, 1, 1)
+                step_out, h = self.gru(feats[t : t + 1], h)
+                rev_outs.append(step_out)
+            out = torch.cat(list(reversed(rev_outs)), dim=0).squeeze(1)
+        else:
+            rev_feats = torch.flip(feats, dims=[0])
+            rev_out, _ = self.gru(rev_feats)
+            out = torch.flip(rev_out, dims=[0]).squeeze(1)
 
         # Blend discovered meta-output with a differentiable bootstrap residual anchor for stable discovery.
         td_anchor = rewards + 0.99 * nonterminals * y_next[:, 0].detach() - y_curr[:, 0].detach()
@@ -183,7 +219,13 @@ def train_discorl(
     env = ensure_gym_env(env_or_factory)
 
     agent = DiscoAgentNet(
-        env.obs_dim, env.action_dim, latent_dim=cfg.latent_dim, hidden_dims=cfg.hidden_dims, is_discrete=env.is_discrete
+        env.obs_dim,
+        env.action_dim,
+        latent_dim=cfg.latent_dim,
+        hidden_dims=cfg.hidden_dims,
+        is_discrete=env.is_discrete,
+        action_low=env.action_low,
+        action_high=env.action_high,
     ).to(dev)
     rule = meta_rule.to(dev) if meta_rule is not None else DiscoMetaUpdateNet(
         latent_dim=cfg.latent_dim, meta_hidden=cfg.meta_hidden
@@ -207,6 +249,7 @@ def train_discorl(
         b_act: torch.Tensor,
         b_rew: torch.Tensor,
         b_nt: torch.Tensor,
+        b_done: torch.Tensor,
         b_mask: torch.Tensor | None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if params_dict is None:
@@ -226,13 +269,13 @@ def train_discorl(
             ent = dist.entropy()
         else:
             logstd = params_dict["logstd"] if params_dict is not None else agent.logstd
-            std = torch.exp(logstd.clamp(-5.0, 2.0)).expand_as(pol_out)
+            std = agent.action_scale * torch.exp(logstd.clamp(-5.0, 2.0)).expand_as(pol_out)
             dist = Normal(pol_out, std)
             lp = dist.log_prob(b_act).sum(-1)
             ent = dist.entropy().sum(-1)
 
         # [AI-Prompt Hook]: DiscoMetaUpdateNet generates policy advantage & latent prediction targets!
-        pi_adv, y_target = rule(b_rew, b_nt, lp.detach(), y_curr.detach(), y_next.detach())
+        pi_adv, y_target = rule(b_rew, b_nt, lp.detach(), y_curr.detach(), y_next.detach(), dones=b_done)
         if pi_adv.numel() > 1:
             pi_adv_norm = (pi_adv - pi_adv.mean()) / (pi_adv.std() + 1e-8)
         else:
@@ -247,11 +290,12 @@ def train_discorl(
         torch.Tensor,
         torch.Tensor,
         torch.Tensor,
+        torch.Tensor,
         torch.Tensor | None,
     ] | None = None
 
     while steps < cfg.total_timesteps:
-        buf_obs, buf_next, buf_act, buf_rew, buf_nt, buf_mask = [], [], [], [], [], []
+        buf_obs, buf_next, buf_act, buf_rew, buf_nt, buf_done, buf_mask = [], [], [], [], [], [], []
         for _ in range(cfg.n_steps):
             if steps >= cfg.total_timesteps:
                 break
@@ -272,7 +316,7 @@ def train_discorl(
                     logits = pol_out.masked_fill(~mask_t, -1e8) if mask_t is not None else pol_out
                     act_env: Any = int(Categorical(logits=logits).sample().item())
                 else:
-                    std = torch.exp(agent.logstd.clamp(-5.0, 2.0)).expand_as(pol_out)
+                    std = agent.action_scale * torch.exp(agent.logstd.clamp(-5.0, 2.0)).expand_as(pol_out)
                     act_env = Normal(pol_out, std).sample().squeeze(0).cpu().numpy()
 
             next_obs, reward, term, trunc, next_info = env.step(act_env)
@@ -285,6 +329,7 @@ def train_discorl(
             buf_act.append(act_env)
             buf_rew.append(float(reward))
             buf_nt.append(0.0 if term else 1.0)
+            buf_done.append(1.0 if (term or trunc) else 0.0)
             if env.is_discrete:
                 buf_mask.append(mask if mask is not None else np.ones(env.action_dim, dtype=np.bool_))
 
@@ -305,13 +350,14 @@ def train_discorl(
         b_act = torch.as_tensor(np.asarray(buf_act, dtype=np.int64 if env.is_discrete else np.float32), device=dev)
         b_rew = torch.as_tensor(np.asarray(buf_rew, dtype=np.float32), device=dev)
         b_nt = torch.as_tensor(np.asarray(buf_nt, dtype=np.float32), device=dev)
+        b_done = torch.as_tensor(np.asarray(buf_done, dtype=np.float32), device=dev)
         b_mask = torch.as_tensor(np.asarray(buf_mask, dtype=np.bool_), device=dev) if env.is_discrete else None
 
         # Bi-level outer meta-gradient step evaluating how inner update affects held-out rollout loss
         if cfg.meta_train and meta_opt is not None and prev_batch is not None:
-            p_obs, p_next, p_act, p_rew, p_nt, p_mask = prev_batch
+            p_obs, p_next, p_act, p_rew, p_nt, p_done, p_mask = prev_batch
             named_params = dict(agent.named_parameters())
-            inner_loss, _ = _compute_inner_loss(named_params, p_obs, p_next, p_act, p_rew, p_nt, p_mask)
+            inner_loss, _ = _compute_inner_loss(named_params, p_obs, p_next, p_act, p_rew, p_nt, p_done, p_mask)
             inner_grads = torch.autograd.grad(inner_loss, list(named_params.values()), create_graph=True)
             fast_params = {k: v - cfg.inner_lr * g for (k, v), g in zip(named_params.items(), inner_grads)}
 
@@ -321,14 +367,14 @@ def train_discorl(
                 logits_v = pol_val.masked_fill(~b_mask, -1e8) if b_mask is not None else pol_val
                 lp_v = Categorical(logits=logits_v).log_prob(b_act)
             else:
-                std_v = torch.exp(fast_params["logstd"].clamp(-5.0, 2.0)).expand_as(pol_val)
+                std_v = agent.action_scale * torch.exp(fast_params["logstd"].clamp(-5.0, 2.0)).expand_as(pol_val)
                 lp_v = Normal(pol_val, std_v).log_prob(b_act).sum(-1)
 
-            # Discounted empirical return signal on validation rollout for outer meta-gradient
+            # Discounted empirical return signal on validation rollout (reset at BOTH term and trunc boundaries)
             ret_v = torch.zeros_like(b_rew)
             g_ret = torch.tensor(0.0, device=dev)
             for t in range(len(b_rew) - 1, -1, -1):
-                g_ret = b_rew[t] + 0.99 * b_nt[t] * g_ret
+                g_ret = b_rew[t] + 0.99 * (1.0 - b_done[t]) * g_ret
                 ret_v[t] = g_ret
             ret_v = (ret_v - ret_v.mean()) / (ret_v.std() + 1e-8)
             outer_loss = -(lp_v * ret_v).mean()
@@ -340,13 +386,13 @@ def train_discorl(
             meta_loss_hist.append(float(outer_loss.item()))
 
         # Inner agent update using current DiscoMetaUpdateNet
-        agent_loss, mean_ent = _compute_inner_loss(None, b_obs, b_next, b_act, b_rew, b_nt, b_mask)
+        agent_loss, mean_ent = _compute_inner_loss(None, b_obs, b_next, b_act, b_rew, b_nt, b_done, b_mask)
         agent_opt.zero_grad()
         agent_loss.backward()
         torch.nn.utils.clip_grad_norm_(agent.parameters(), 0.5)
         agent_opt.step()
         ent_hist.append(float(mean_ent.item()))
-        prev_batch = (b_obs, b_next, b_act, b_rew, b_nt, b_mask)
+        prev_batch = (b_obs, b_next, b_act, b_rew, b_nt, b_done, b_mask)
 
     if obs_rms is not None:
         obs_rms.freeze(True)

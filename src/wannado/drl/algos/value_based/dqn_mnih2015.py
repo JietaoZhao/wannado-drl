@@ -157,10 +157,16 @@ def train_dqn(
         b_rew: torch.Tensor,
         b_next: Any,
         b_term: torch.Tensor,
+        b_next_mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, float]:
         # [AI-Prompt Hook]: Standard Bellman target; swap max(next_q) for Double DQN or C51 projection.
         with torch.no_grad():
-            next_q_max = target_net(b_next).max(dim=1).values
+            next_q_vals = target_net(b_next)
+            if b_next_mask is not None:
+                valid_row = b_next_mask.any(dim=1, keepdim=True)
+                safe_mask = torch.where(valid_row, b_next_mask, torch.ones_like(b_next_mask))
+                next_q_vals = next_q_vals.masked_fill(~safe_mask, -1e9)
+            next_q_max = next_q_vals.max(dim=1).values
             td_target = b_rew + cfg.gamma * (1.0 - b_term) * next_q_max
         q_pred = q_net(b_obs).gather(1, b_act.unsqueeze(1)).squeeze(1)
         return F.smooth_l1_loss(q_pred, td_target), float(q_pred.mean().item())

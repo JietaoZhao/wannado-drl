@@ -108,8 +108,9 @@ def train_grpo(
     rng = set_global_seed(cfg.seed)
     dev = resolve_device(cfg.device)
 
+    max_seq_len = max(128, int(task.prompt_len) + int(task.max_response_len) + 8)
     model = policy if policy is not None else AutoregressiveSeqPolicy(
-        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim
+        task.vocab_size, embed_dim=cfg.embed_dim, hidden_dim=cfg.hidden_dim, max_seq_len=max_seq_len
     ).to(dev)
     ref_model = copy.deepcopy(model).to(dev)
     ref_model.eval()
@@ -129,7 +130,7 @@ def train_grpo(
 
         with torch.no_grad():
             responses_t, old_lps = model.generate(prompts_t, task.max_response_len, temperature=cfg.temperature)
-            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(prompts_t, responses_t)
+            ref_lps, _ = ref_model.sequence_logprobs_and_entropy(prompts_t, responses_t, temperature=cfg.temperature)
 
         resp_np = responses_t.cpu().numpy()
         total_rollouts += int(resp_np.shape[0])
@@ -141,8 +142,11 @@ def train_grpo(
         adv_grp = (rews_grp - rews_grp.mean(axis=1, keepdims=True)) / (rews_grp.std(axis=1, keepdims=True) + 1e-6)
         adv_t = torch.as_tensor(adv_grp.reshape(-1, 1), device=dev, dtype=torch.float32)
 
+        valid_mask = AutoregressiveSeqPolicy.eos_valid_mask(responses_t, task.eos_token_id)
+        mask_denom = valid_mask.sum().clamp(min=1.0)
+
         for _ in range(cfg.update_epochs):
-            new_lps, entropy = model.sequence_logprobs_and_entropy(prompts_t, responses_t)
+            new_lps, entropy = model.sequence_logprobs_and_entropy(prompts_t, responses_t, temperature=cfg.temperature)
             ratio = torch.exp(new_lps - old_lps)
             # [AI-Prompt Hook]: GRPO clipped token surrogate + unbiased k3 KL divergence to frozen reference.
             pg_1 = ratio * adv_t
@@ -151,15 +155,15 @@ def train_grpo(
 
             log_ratio_ref = ref_lps - new_lps
             kl_k3 = torch.exp(log_ratio_ref) - log_ratio_ref - 1.0
-            loss = -(pg_obj - cfg.kl_coef * kl_k3).mean()
+            loss = -((pg_obj - cfg.kl_coef * kl_k3) * valid_mask).sum() / mask_denom
 
             optimizer.zero_grad()
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
             optimizer.step()
 
-            ent_hist.append(float(entropy.mean().item()))
-            kl_hist.append(float(kl_k3.mean().item()))
+            ent_hist.append(float(((entropy * valid_mask).sum() / mask_denom).item()))
+            kl_hist.append(float(((kl_k3 * valid_mask).sum() / mask_denom).item()))
 
         if step % max(1, cfg.total_updates // 10) == 0 or step == cfg.total_updates:
             learning_curve.append({"step": float(step), "episode_return": float(np.mean(rews_np)), "kl": kl_hist[-1]})

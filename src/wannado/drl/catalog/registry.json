@@ -781,9 +781,7 @@
         "Replace log-sum-exp penalty with in-sample expectile regression -> `iql_offline`"
       ],
       "module_path": "wannado.drl.algos.offline_rl.cql_kumar2020",
-      "default_optimizations": [
-        "clipped_double_q"
-      ],
+      "default_optimizations": [],
       "citation": {
         "key": "kumar2020conservative",
         "title": "Conservative Q-Learning for Offline Reinforcement Learning",
@@ -795,24 +793,7 @@
         "ieee": "A. Kumar, A. Zhou, G. Tucker, and S. Levine, \"Conservative Q-learning for offline reinforcement learning,\" in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2020.",
         "apa": "Kumar, A., Zhou, A., Tucker, G., & Levine, S. (2020). Conservative Q-learning for offline reinforcement learning. NeurIPS."
       },
-      "optimization_citations": [
-        {
-          "id": "clipped_double_q",
-          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
-          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
-          "citation": {
-            "key": "fujimoto2018addressing",
-            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
-            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
-            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
-            "year": 2018,
-            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
-            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
-            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
-            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
-          }
-        }
-      ]
+      "optimization_citations": []
     },
     {
       "id": "iql_offline",
@@ -848,9 +829,7 @@
         "Fine-tune online after offline pretraining using `sac`"
       ],
       "module_path": "wannado.drl.algos.offline_rl.iql_kostrikov2022",
-      "default_optimizations": [
-        "clipped_double_q"
-      ],
+      "default_optimizations": [],
       "citation": {
         "key": "kostrikov2022offline",
         "title": "Offline Reinforcement Learning with Implicit Q-Learning",
@@ -862,24 +841,7 @@
         "ieee": "I. Kostrikov, A. Nair, and S. Levine, \"Offline reinforcement learning with implicit Q-learning,\" in Proc. Int. Conf. Learn. Represent. (ICLR), 2022.",
         "apa": "Kostrikov, I., Nair, A., & Levine, S. (2022). Offline reinforcement learning with implicit Q-learning. ICLR."
       },
-      "optimization_citations": [
-        {
-          "id": "clipped_double_q",
-          "name": "Clipped Double-Q Critic Target min(Q1, Q2)",
-          "role_plain": "Takes the minimum over twin target Q-networks to prevent continuous actor-critic Q-overestimation.",
-          "citation": {
-            "key": "fujimoto2018addressing",
-            "title": "Addressing Function Approximation Error in Actor-Critic Methods",
-            "authors": "Scott Fujimoto, Herke van Hoof, and David Meger",
-            "venue": "Proceedings of the 35th International Conference on Machine Learning (ICML), PMLR 80",
-            "year": 2018,
-            "url": "https://proceedings.mlr.press/v80/fujimoto18a.html",
-            "bibtex": "@inproceedings{fujimoto2018addressing,\n  title={Addressing Function Approximation Error in Actor-Critic Methods},\n  author={Fujimoto, Scott and van Hoof, Herke and Meger, David},\n  booktitle={Proceedings of the International Conference on Machine Learning (ICML)},\n  volume={80},\n  year={2018},\n  url={https://proceedings.mlr.press/v80/fujimoto18a.html}\n}",
-            "ieee": "S. Fujimoto, H. van Hoof, and D. Meger, \"Addressing function approximation error in actor-critic methods,\" in Proc. ICML, PMLR 80, 2018.",
-            "apa": "Fujimoto, S., van Hoof, H., & Meger, D. (2018). Addressing function approximation error in actor-critic methods. ICML (PMLR 80)."
-          }
-        }
-      ]
+      "optimization_citations": []
     },
     {
       "id": "reinforce",
@@ -1927,9 +1889,7 @@
         "Auto-scale [v_min, v_max] or switch to Quantile Huber loss (QR-DQN)"
       ],
       "module_path": "wannado.drl.algos.value_based.c51_bellemare2017",
-      "default_optimizations": [
-        "double_q_target"
-      ],
+      "default_optimizations": [],
       "citation": {
         "key": "bellemare2017distributional",
         "title": "A Distributional Perspective on Reinforcement Learning",
@@ -1941,24 +1901,7 @@
         "ieee": "M. G. Bellemare, W. Dabney, and R. Munos, \"A distributional perspective on reinforcement learning,\" in Proc. Int. Conf. Mach. Learn. (ICML), PMLR 70, 2017.",
         "apa": "Bellemare, M. G., Dabney, W., & Munos, R. (2017). A distributional perspective on reinforcement learning. ICML (PMLR 70)."
       },
-      "optimization_citations": [
-        {
-          "id": "double_q_target",
-          "name": "Double Q-Learning Target Decoupling",
-          "role_plain": "Decouples greedy next-action selection (online Q) from evaluation (target Q) to suppress maximization bias.",
-          "citation": {
-            "key": "vanhasselt2016deep",
-            "title": "Deep Reinforcement Learning with Double Q-learning",
-            "authors": "Hado van Hasselt, Arthur Guez, and David Silver",
-            "venue": "Proceedings of the AAAI Conference on Artificial Intelligence (AAAI)",
-            "year": 2016,
-            "url": "https://arxiv.org/abs/1509.06461",
-            "bibtex": "@inproceedings{vanhasselt2016deep,\n  title={Deep Reinforcement Learning with Double Q-learning},\n  author={van Hasselt, Hado and Guez, Arthur and Silver, David},\n  booktitle={Proceedings of the AAAI Conference on Artificial Intelligence},\n  year={2016},\n  url={https://arxiv.org/abs/1509.06461}\n}",
-            "ieee": "H. van Hasselt, A. Guez, and D. Silver, \"Deep reinforcement learning with double Q-learning,\" in Proc. AAAI, 2016.",
-            "apa": "van Hasselt, H., Guez, A., & Silver, D. (2016). Deep reinforcement learning with double Q-learning. AAAI."
-          }
-        }
-      ]
+      "optimization_citations": []
     }
   ]
 }

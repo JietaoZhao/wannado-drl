@@ -122,6 +122,7 @@ class EpisodeEvalStats:
     task_metrics_mean: dict[str, float] = field(default_factory=dict)
     terminated_fraction: float = 0.0
     truncated_fraction: float = 0.0
+    mean_cost: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize evaluation stats."""
